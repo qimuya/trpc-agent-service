@@ -80,6 +80,23 @@ tRPC-Agent-Python 已经具备 Agent 编排、Tool / MCP、Session、Memory、Kn
 6.必须列出至少 8 个生产风险和缓解措施。 
 7.方案需要明确哪些能力可直接复用 tRPC-Agent-Python，哪些需要新增平台层模块。
 
+## tRPC-Agent SDK 最小验证
+
+本仓库提供一个完全离线、无需模型 API Key 的兼容性验证，用于证明验收标准 7
+中的框架复用基线：Agent 执行、Event 输出和 Session 管理由固定版本
+`trpc-agent-py==1.1.19` 直接提供。该验证不代表多租户、Gateway、IM、共享存储或
+生产部署已经实现。
+
+```powershell
+uv sync --group dev
+uv run python -m trpc_service.agent.sdk_validation
+uv run python -m trpc_service.agent.sdk_validation --json
+uv run pytest tests/sdk_validation -q
+```
+
+完整的运行前提、预期输出、重复性与计时验收方式见
+[`specs/001-trpc-agent-sdk-validation/quickstart.md`](specs/001-trpc-agent-sdk-validation/quickstart.md)。
+
 ## 代码目录
 
 ```txt
