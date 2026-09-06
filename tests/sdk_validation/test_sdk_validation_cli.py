@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,7 +98,7 @@ def test_json_runs_are_equal_after_dynamic_fields_are_removed(capsys: pytest.Cap
 def test_cli_output_never_echoes_environment_credentials(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    secret = "sdk-validation-super-secret-value"
+    secret = secrets.token_urlsafe(32)
     monkeypatch.setenv("OPENAI_API_KEY", secret)
     result = run_cli(capsys, "--json")
 

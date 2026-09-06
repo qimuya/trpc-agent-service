@@ -1280,7 +1280,11 @@ name = "trpc-agent-service"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "starlette" },
     { name = "trpc-agent-py" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -1290,7 +1294,13 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "trpc-agent-py", specifier = "==1.1.19" }]
+requires-dist = [
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "pydantic", specifier = "==2.13.5" },
+    { name = "starlette", specifier = "==1.6.0" },
+    { name = "trpc-agent-py", specifier = "==1.1.19" },
+    { name = "uvicorn", specifier = "==0.52.4" },
+]
 
 [package.metadata.requires-dev]
 dev = [

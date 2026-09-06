@@ -97,6 +97,36 @@ uv run pytest tests/sdk_validation -q
 完整的运行前提、预期输出、重复性与计时验收方式见
 [`specs/001-trpc-agent-sdk-validation/quickstart.md`](specs/001-trpc-agent-sdk-validation/quickstart.md)。
 
+## 第二阶段：多租户本地消息闭环
+
+仓库现已实现一个离线、单进程的纵向验证链路：`Local HTTP Channel Adapter →
+Gateway → HMAC Channel Binding → tenant-scoped Session → Agent Worker → 官方
+tRPC-Agent Runner → 统一回复 → Audit/Metrics`。两个演示租户使用独立运行时密钥，
+同租户多轮消息保持上下文，跨租户会话、审计和指标隔离；重复消息、冲突、超时、
+取消和审计故障都有稳定语义。
+
+```powershell
+uv sync --group dev
+$env:TRPC_DEMO_ALPHA_SECRET = "<runtime-generated-secret>"
+$env:TRPC_DEMO_BETA_SECRET = "<different-runtime-generated-secret>"
+uv run trpc-agent-local-serve --host 127.0.0.1 --port 8000
+```
+
+另一个 PowerShell 会话设置相同的临时环境变量后，可发送一条签名消息：
+
+```powershell
+uv run trpc-agent-local-send --binding-id binding-alpha --secret-env TRPC_DEMO_ALPHA_SECRET --external-message-id alpha-001 --external-user-id shared-user --conversation-type direct --external-conversation-id shared-conversation --text "Remember validation token ALPHA."
+```
+
+完整双租户、多轮、重复、冲突与拒绝演示见
+[`specs/002-multitenant-local-message-flow/quickstart.md`](specs/002-multitenant-local-message-flow/quickstart.md)。
+自动化验收命令为 `uv run pytest -q`。
+
+本阶段明确只使用 InMemory Repository、单进程锁、本地 MetricsSnapshot 和确定性离线
+模型；它不代表真实企业微信、Redis/SQL、跨节点一致性、生产 Telemetry、真实模型、
+Kubernetes 或管理后台已经完成。Repository/Adapter 端口已保留，后续后端必须复用
+现有契约测试。
+
 ## 代码目录
 
 ```txt
