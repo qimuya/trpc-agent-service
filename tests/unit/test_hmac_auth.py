@@ -68,13 +68,13 @@ def test_invalid_auth_inputs_share_one_safe_error(timestamp: str, signature: str
     assert "unknown-candidate" not in str(caught.value)
 
 
-def test_malformed_public_auth_fields_are_rejected_before_registry_lookup() -> None:
+async def test_malformed_public_auth_fields_are_rejected_before_registry_lookup() -> None:
     class Registry:
         def get_auth_material(self, *_args):
             raise AssertionError("registry must not be queried")
 
     with pytest.raises(Unauthorized):
-        hmac_auth.verify_request(
+        await hmac_auth.verify_request(
             binding_id="candidate", timestamp="not-a-time", signature="bad",
             external_message_id="message-001", raw_body=b"{}",
             registry=Registry(), resolver=object(), now=FIXED_UTC,

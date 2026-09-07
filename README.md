@@ -127,6 +127,31 @@ uv run trpc-agent-local-send --binding-id binding-alpha --secret-env TRPC_DEMO_A
 Kubernetes 或管理后台已经完成。Repository/Adapter 端口已保留，后续后端必须复用
 现有契约测试。
 
+## 第三阶段：多节点共享状态消息闭环
+
+仓库进一步提供本地双 Worker 验证：两个独立进程共享 Redis 7.4.11 的幂等、Session、
+租约和 fencing 状态，以及 PostgreSQL 17.11 的权威租户配置、Audit 和 RecoveryMarker。
+同一会话可跨节点继续；同一消息并发到达时只有一个 owner；同会话串行而不同会话并行；
+配置或状态后端不可用时失败关闭，不回退到进程内状态。
+
+```powershell
+uv sync --group dev
+# 先在当前 PowerShell 设置两个 Channel secret、Redis/PostgreSQL 临时密码和共享 DSN
+docker compose -f deploy/local-shared/compose.yaml up -d --wait
+$env:TRPC_RUNTIME_PROFILE = "shared"
+uv run trpc-agent-shared-init
+uv run trpc-agent-shared-serve --node-id worker-a --host 127.0.0.1 --port 8001
+# 另一个设置相同运行时环境的 PowerShell 启动 worker-b，端口使用 8002
+```
+
+完整的临时凭据生成、双节点消息、故障测试、结果判读和安全清理步骤见
+[`specs/003-shared-state-multinode-flow/quickstart.md`](specs/003-shared-state-multinode-flow/quickstart.md)，
+答辩摘要见
+[`specs/003-shared-state-multinode-flow/阶段成果记录.md`](specs/003-shared-state-multinode-flow/阶段成果记录.md)。
+
+本阶段仍不包含真实企业微信、向量库、Kubernetes、管理后台、真实模型 API 或生产级
+Telemetry，也不宣称生产 HA 或跨 Redis/PostgreSQL 的生产 exactly-once。
+
 ## 代码目录
 
 ```txt

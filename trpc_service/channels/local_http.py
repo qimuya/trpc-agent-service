@@ -17,7 +17,8 @@ from trpc_service.channels.contracts import InboundMessage, OutboundReply
 from trpc_service.metrics.contracts import MetricsUnavailable
 from trpc_service.log import log_delivery
 from trpc_service.channels.hmac_auth import verify_request
-from trpc_service.storage.contracts import AccessDenied, AuditUnavailable, Unauthorized
+from trpc_service.storage.contracts import AccessDenied, AuditUnavailable, PlatformPortError, Unauthorized
+from trpc_service.web.errors import map_platform_error
 
 
 def reply_envelope(reply: OutboundReply) -> dict[str, object]:
@@ -47,7 +48,7 @@ class LocalHttpChannelAdapter:
     def __init__(self, runtime: object) -> None:
         self.runtime = runtime
 
-    def _observe_rejection(
+    async def _observe_rejection(
         self,
         *,
         decision: AuditDecision,
@@ -70,7 +71,7 @@ class LocalHttpChannelAdapter:
             created_at=self.runtime.now(),
         )
         try:
-            self.runtime.adapters.audit.append(scope, record)
+            await self.runtime.adapters.audit.append(scope, record)
         except AuditUnavailable:
             pass
         try:
@@ -104,13 +105,13 @@ class LocalHttpChannelAdapter:
             if not isinstance(external_message_id, str):
                 raise ValueError
         except (ValueError, json.JSONDecodeError):
-            self._observe_rejection(
+            await self._observe_rejection(
                 decision=AuditDecision.INVALID_REQUEST, trace_id=trace_id,
                 binding_id=binding_id, external_message_id=external_message_id,
             )
             return self._error(400, "invalid_request", "Request validation failed.", trace_id)
         try:
-            verified = verify_request(
+            verified = await verify_request(
                 binding_id=binding_id,
                 timestamp=request.headers.get("x-request-timestamp", ""),
                 signature=request.headers.get("x-signature", ""),
@@ -139,23 +140,26 @@ class LocalHttpChannelAdapter:
             log_delivery(trace_id=reply.trace_id, outcome=reply.status.value, status_code=status_code)
             return JSONResponse(reply_envelope(reply), status_code=status_code)
         except Unauthorized:
-            self._observe_rejection(
+            await self._observe_rejection(
                 decision=AuditDecision.UNAUTHORIZED, trace_id=trace_id,
                 binding_id=binding_id, external_message_id=external_message_id,
             )
             return self._error(401, "unauthorized", "Request authentication failed.", trace_id)
         except AccessDenied:
-            self._observe_rejection(
+            await self._observe_rejection(
                 decision=AuditDecision.ACCESS_DENIED, trace_id=trace_id,
                 binding_id=binding_id, external_message_id=external_message_id,
             )
             return self._error(403, "access_denied", "Request access denied.", trace_id)
         except ValidationError:
-            self._observe_rejection(
+            await self._observe_rejection(
                 decision=AuditDecision.INVALID_REQUEST, trace_id=trace_id,
                 binding_id=binding_id, external_message_id=external_message_id,
             )
             return self._error(400, "invalid_request", "Request validation failed.", trace_id)
+        except PlatformPortError as exc:
+            mapped = map_platform_error(exc)
+            return self._error(mapped.status_code, mapped.code, mapped.message, trace_id)
 
     @staticmethod
     def _error(status: int, code: str, message: str, trace_id: UUID) -> JSONResponse:

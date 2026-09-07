@@ -20,7 +20,7 @@ from tests.support import inbound_message_data
 from tests.support import FIXED_UTC
 
 
-def test_active_directory_audit_and_metrics_happy_path() -> None:
+async def test_active_directory_audit_and_metrics_happy_path() -> None:
     adapters = InMemoryPlatformAdapters(build_demo_settings())
     trace_id = UUID("11111111-1111-4111-8111-111111111111")
     context = adapters.context_for_test("binding-alpha", "user-001", trace_id)
@@ -36,8 +36,8 @@ def test_active_directory_audit_and_metrics_happy_path() -> None:
         latency_ms=1,
         created_at=FIXED_UTC,
     )
-    adapters.audit.append(scope, record)
-    assert adapters.audit.list_by_trace(scope, trace_id) == [record]
+    await adapters.audit.append(scope, record)
+    assert await adapters.audit.list_by_trace(scope, trace_id) == [record]
 
     metrics = InMemoryMetricsRecorder()
     metrics.record(scope, trace_id=trace_id, stage="request", outcome="success", duration_ms=2)
@@ -45,7 +45,7 @@ def test_active_directory_audit_and_metrics_happy_path() -> None:
 
     forged = VerifiedBindingScope.model_construct(binding_id="binding-alpha", channel="local_http")
     with pytest.raises(AccessDenied):
-        adapters.resolve_active_context(forged, external_user_id="user-001", trace_id=trace_id)
+        await adapters.resolve_active_context(forged, external_user_id="user-001", trace_id=trace_id)
 
 
 async def test_gateway_accepts_a_minimal_port_compatible_adapter() -> None:
@@ -54,10 +54,10 @@ async def test_gateway_accepts_a_minimal_port_compatible_adapter() -> None:
             self.inner = InMemoryPlatformAdapters(build_demo_settings())
             self.audit = self.inner.audit
             self.idempotency = self.inner.idempotency
-        def get_auth_material(self, binding_id, channel):
-            return self.inner.get_auth_material(binding_id, channel)
-        def resolve_active_context(self, scope, **kwargs):
-            return self.inner.resolve_active_context(scope, **kwargs)
+        async def get_auth_material(self, binding_id, channel):
+            return await self.inner.get_auth_material(binding_id, channel)
+        async def resolve_active_context(self, scope, **kwargs):
+            return await self.inner.resolve_active_context(scope, **kwargs)
 
     adapters = FakeAdapters()
     assert isinstance(adapters, PlatformAdapters)
@@ -72,7 +72,7 @@ async def test_gateway_accepts_a_minimal_port_compatible_adapter() -> None:
 
 
 @pytest.mark.parametrize("resource", ["tenant", "agent", "binding", "ownership"])
-def test_directory_rejects_disabled_or_misowned_resources_without_business_state(resource: str) -> None:
+async def test_directory_rejects_disabled_or_misowned_resources_without_business_state(resource: str) -> None:
     settings = build_demo_settings()
     if resource == "tenant":
         settings = settings.model_copy(update={"tenants": (settings.tenants[0].model_copy(update={"status": "disabled"}),) + settings.tenants[1:]})
@@ -85,6 +85,6 @@ def test_directory_rejects_disabled_or_misowned_resources_without_business_state
     adapters = InMemoryPlatformAdapters(settings)
     scope = VerifiedBindingScope._issue(binding_id="binding-alpha", channel="local_http")
     with pytest.raises(AccessDenied):
-        adapters.resolve_active_context(scope, external_user_id="user-001", trace_id=UUID(int=60000))
+        await adapters.resolve_active_context(scope, external_user_id="user-001", trace_id=UUID(int=60000))
     assert adapters.idempotency._records == {}
     assert adapters.audit._tenant_records == {}

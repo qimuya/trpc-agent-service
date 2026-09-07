@@ -9,8 +9,11 @@ description = "Multi-tenant tRPC-Agent service platform"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "asyncpg==0.31.0",
     "httpx==0.28.1",
     "pydantic==2.13.5",
+    "redis==8.1.0",
+    "sqlalchemy==2.0.52",
     "starlette==1.6.0",
     "trpc-agent-py==1.1.19",
     "uvicorn==0.52.4",
@@ -20,6 +23,8 @@ dependencies = [
 trpc-agent-sdk-validate = "trpc_service.agent.sdk_validation:main"
 trpc-agent-local-serve = "trpc_service._cli:serve_main"
 trpc-agent-local-send = "trpc_service._cli:send_main"
+trpc-agent-shared-init = "trpc_service._cli:shared_init_main"
+trpc-agent-shared-serve = "trpc_service._cli:shared_serve_main"
 
 [dependency-groups]
 dev = [
@@ -34,3 +39,6 @@ include = ["trpc_service*"]
 addopts = "-ra"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "shared_backend: requires the local Redis and PostgreSQL shared-state profile",
+]

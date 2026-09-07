@@ -15,7 +15,8 @@ from trpc_service.metrics.contracts import MetricsRecorder, MetricsUnavailable
 from trpc_service.storage.locks import SessionLockManager
 from trpc_service.storage.models import ClaimDisposition, ExecutionResult, ExecutionStatus, IdempotencyKey, content_fingerprint
 from trpc_service.tenant.session_identity import derive_session_identity
-from trpc_service.storage.contracts import AgentExecutionFailed, AgentExecutorPort, AgentPreparationFailed, AuditUnavailable, ConditionalWriteFailed, OutcomeUnknown, PlatformAdapters, SessionLockManager as SessionLockPort
+from trpc_service.storage.contracts import AgentExecutionFailed, AgentExecutorPort, AgentPreparationFailed, AuditUnavailable, ConditionalWriteFailed, OutcomeUnknown, PlatformAdapters, SessionLockManager as SessionLockPort, StateBackendUnavailable
+from trpc_service.storage.redis_leases import current_session_fence
 
 
 def _digest(value: str) -> str:
@@ -68,7 +69,7 @@ class GatewayService:
         except MetricsUnavailable:
             pass
 
-    def _audit(
+    async def _audit(
         self,
         scope: TenantScope,
         message: InboundMessage,
@@ -78,16 +79,33 @@ class GatewayService:
         session_id: str | None = None,
         error_type: str | None = None,
         original_trace_id: UUID | None = None,
+        persist: bool = True,
     ) -> AuditRecord:
+        first_trace = owner_trace = execution_trace = None
+        generation = None
+        try:
+            state = await self.adapters.idempotency.get(IdempotencyKey(
+                tenant_id=scope.tenant_id, binding_id=message.binding_id,
+                external_message_id=message.external_message_id,
+            ))
+            first_trace, owner_trace = state.first_claim_trace_id, state.owner_trace_id
+            execution_trace, generation = state.execution_trace_id, state.generation
+        except Exception:
+            pass
         record = AuditRecord(
             audit_id=uuid4(),
             trace_id=message.trace_id,
             original_trace_id=original_trace_id,
+            first_claim_trace_id=first_trace,
+            owner_trace_id=owner_trace,
+            execution_trace_id=execution_trace,
+            generation=generation,
             tenant_id=scope.tenant_id,
             channel=message.channel,
             binding_id_digest=_digest(message.binding_id),
             user_id=_scoped_digest(scope.tenant_id, message.external_user_id),
             session_id=session_id,
+            agent_id=getattr(context, "agent_id", None),
             agent_name=getattr(context, "agent_name", None),
             decision=decision,
             latency_ms=0,
@@ -96,7 +114,21 @@ class GatewayService:
             external_message_digest=_digest(message.external_message_id),
             created_at=self._now(),
         )
-        return self.adapters.audit.append(scope, record)
+        observe_trace = getattr(self.metrics, "observe_trace", None)
+        if observe_trace is not None:
+            try:
+                observe_trace(
+                    scope, backend="redis", outcome=decision.value,
+                    first_trace=str(first_trace) if first_trace else None,
+                    owner_trace=str(owner_trace) if owner_trace else None,
+                    execution_trace=str(execution_trace) if execution_trace else None,
+                    generation=generation,
+                )
+            except MetricsUnavailable:
+                pass
+        if persist:
+            return await self.adapters.audit.append(scope, record, current_session_fence())
+        return record
 
     @staticmethod
     def _failed_reply(
@@ -133,7 +165,7 @@ class GatewayService:
         message: InboundMessage,
     ) -> OutboundReply:
         started = monotonic()
-        context = self.adapters.resolve_active_context(
+        context = await self.adapters.resolve_active_context(
             verified_scope,
             external_user_id=message.external_user_id,
             trace_id=message.trace_id,
@@ -141,9 +173,9 @@ class GatewayService:
         scope = TenantScope.from_context(context)
         identity = derive_session_identity(context, message.conversation_type, message.external_conversation_id)
         key = IdempotencyKey(tenant_id=context.tenant_id, binding_id=context.binding_id, external_message_id=message.external_message_id)
-        claim = self.adapters.idempotency.claim(key, content_fingerprint(message), message.trace_id, self._now())
+        claim = await self.adapters.idempotency.claim(key, content_fingerprint(message), message.trace_id, self._now())
         if claim.disposition == ClaimDisposition.CONFLICT:
-            self._audit(scope, message, context, AuditDecision.IDEMPOTENCY_CONFLICT, session_id=identity.platform_session_id)
+            await self._audit(scope, message, context, AuditDecision.IDEMPOTENCY_CONFLICT, session_id=identity.platform_session_id)
             self._record_metrics(scope, message, started, outcome="error")
             return OutboundReply(
                 status=ReplyStatus.CONFLICT,
@@ -155,7 +187,7 @@ class GatewayService:
                 error=ErrorDetail(code="idempotency_conflict", message="The message identifier was already used for different content.", retryable=False, execution_started=False),
             )
         if claim.disposition == ClaimDisposition.PROCESSING:
-            self._audit(scope, message, context, AuditDecision.PROCESSING, session_id=identity.platform_session_id, original_trace_id=claim.original_trace_id)
+            await self._audit(scope, message, context, AuditDecision.PROCESSING, session_id=identity.platform_session_id, original_trace_id=claim.original_trace_id)
             self._record_metrics(scope, message, started, outcome="success")
             return OutboundReply(
                 status=ReplyStatus.PROCESSING,
@@ -166,12 +198,21 @@ class GatewayService:
                 external_message_id=message.external_message_id,
                 delivery_action=DeliveryAction.NONE,
             )
+        if claim.disposition == ClaimDisposition.OUTCOME_UNKNOWN:
+            self._record_metrics(scope, message, started, outcome="error")
+            return self._failed_reply(
+                message, tenant_id=context.tenant_id,
+                session_id=identity.platform_session_id,
+                code="outcome_unknown", safe_message="Agent outcome is unknown.",
+                retryable=False, execution_started=True,
+                original_trace_id=claim.original_trace_id,
+            )
         if claim.disposition == ClaimDisposition.COMPLETED:
             result = claim.result
             if result is None:
                 raise RuntimeError("terminal idempotency result is missing")
             decision = AuditDecision.DUPLICATE
-            self._audit(scope, message, context, decision, session_id=identity.platform_session_id, original_trace_id=result.original_trace_id)
+            await self._audit(scope, message, context, decision, session_id=identity.platform_session_id, original_trace_id=result.original_trace_id)
             if result.status == ExecutionStatus.SUCCEEDED:
                 self._record_metrics(scope, message, started, outcome="success")
                 return OutboundReply(
@@ -198,11 +239,15 @@ class GatewayService:
         owner_token = claim.owner_token
         if owner_token is None:
             raise RuntimeError("acquired claim has no owner token")
-        async with self.locks.acquire(identity.platform_session_id):
+        if hasattr(self.locks, "acquire_for_message"):
+            lock_context = await self.locks.acquire_for_message(context, identity, key)
+        else:
+            lock_context = self.locks.acquire(identity.platform_session_id)
+        async with lock_context:
             try:
-                self._audit(scope, message, context, AuditDecision.AUTHORIZED, session_id=identity.platform_session_id)
+                await self._audit(scope, message, context, AuditDecision.AUTHORIZED, session_id=identity.platform_session_id)
             except AuditUnavailable:
-                self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "audit_unavailable", self._now())
+                await self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "audit_unavailable", self._now())
                 self._record_metrics(scope, message, started, outcome="error")
                 return self._failed_reply(
                     message,
@@ -216,13 +261,13 @@ class GatewayService:
             try:
                 prepared = await self.worker.prepare(context, identity, message.text)
             except asyncio.CancelledError:
-                self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "cancelled", self._now())
+                await self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "cancelled", self._now())
                 self._record_metrics(scope, message, started, outcome="error")
                 raise
             except (AgentPreparationFailed, Exception) as exc:
                 if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                     raise
-                self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "agent_unavailable", self._now())
+                await self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "agent_unavailable", self._now())
                 self._record_metrics(scope, message, started, outcome="error")
                 return self._failed_reply(
                     message,
@@ -234,9 +279,9 @@ class GatewayService:
                     execution_started=False,
                 )
             try:
-                self._audit(scope, message, context, AuditDecision.EXECUTION_STARTED, session_id=identity.platform_session_id)
+                await self._audit(scope, message, context, AuditDecision.EXECUTION_STARTED, session_id=identity.platform_session_id)
             except AuditUnavailable:
-                self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "audit_unavailable", self._now())
+                await self.adapters.idempotency.mark_pre_start_failed(key, owner_token, "audit_unavailable", self._now())
                 self._record_metrics(scope, message, started, outcome="error")
                 return self._failed_reply(
                     message, tenant_id=context.tenant_id,
@@ -244,7 +289,7 @@ class GatewayService:
                     code="audit_unavailable", safe_message="Audit service is unavailable.",
                     retryable=True, execution_started=False,
                 )
-            self.adapters.idempotency.mark_running(key, owner_token, message.trace_id, self._now())
+            await self.adapters.idempotency.mark_running(key, owner_token, message.trace_id, self._now())
             started_at = self._now()
             try:
                 execution = await prepared.execute(timeout_seconds=30)
@@ -288,8 +333,25 @@ class GatewayService:
                     final_response_count=0,
                     delivery_action=DeliveryAction.NONE,
                 )
+            recovery_marker = None
             try:
-                self._audit(scope, message, context, decision, session_id=identity.platform_session_id, error_type=result.error_code)
+                if hasattr(self.adapters.audit, "append_final_with_recovery"):
+                    final_record = await self._audit(
+                        scope, message, context, decision,
+                        session_id=identity.platform_session_id,
+                        error_type=result.error_code, persist=False,
+                    )
+                    message_record = await self.adapters.idempotency.get(key)
+                    session_fence = current_session_fence()
+                    recovery_marker = await self.adapters.audit.append_final_with_recovery(
+                        scope, final_record, result,
+                        message_generation=message_record.generation,
+                        session_generation=session_fence.generation if session_fence else 1,
+                        idempotency_key_digest=self.adapters.idempotency.codec.idempotency(key).rsplit(":", 1)[-1],
+                        fence_proof=session_fence,
+                    )
+                else:
+                    await self._audit(scope, message, context, decision, session_id=identity.platform_session_id, error_type=result.error_code)
             except AuditUnavailable:
                 result = ExecutionResult(
                     status=ExecutionStatus.FAILED_POST_START,
@@ -304,8 +366,8 @@ class GatewayService:
                     delivery_action=DeliveryAction.NONE,
                 )
             try:
-                self.adapters.idempotency.complete(key, owner_token, result, self._now())
-            except ConditionalWriteFailed:
+                await self.adapters.idempotency.complete(key, owner_token, result, self._now())
+            except (ConditionalWriteFailed, StateBackendUnavailable):
                 result = ExecutionResult(
                     status=ExecutionStatus.OUTCOME_UNKNOWN,
                     error_code="outcome_unknown",
@@ -318,7 +380,19 @@ class GatewayService:
                     final_response_count=0,
                     delivery_action=DeliveryAction.NONE,
                 )
-                self.adapters.idempotency.mark_outcome_unknown(key, owner_token, result, self._now())
+                if recovery_marker is None:
+                    try:
+                        await self.adapters.idempotency.mark_outcome_unknown(key, owner_token, result, self._now())
+                    except Exception:
+                        pass
+            else:
+                if recovery_marker is not None:
+                    try:
+                        await self.adapters.audit.mark_recovery_reconciled(recovery_marker["id"])
+                    except AuditUnavailable:
+                        # The terminal result is already durable in Redis. The pending
+                        # marker is intentionally left for the background reconciler.
+                        pass
         self._record_metrics(
             scope,
             message,

@@ -49,11 +49,20 @@ class AuditRecord(_AuditModel):
     audit_id: UUID
     trace_id: UUID
     original_trace_id: UUID | None = None
+    first_claim_trace_id: UUID | None = None
+    owner_trace_id: UUID | None = None
+    execution_trace_id: UUID | None = None
+    generation: int | None = Field(default=None, gt=0)
+    node_id: str | None = Field(default=None, max_length=64)
+    audit_kind: str = Field(default="business", pattern=r"^(business|diagnostic)$")
+    rejected_generation: int | None = Field(default=None, gt=0)
+    current_generation: int | None = Field(default=None, gt=0)
     tenant_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     channel: Channel
     binding_id_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     user_id: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     session_id: str | None = Field(default=None, pattern=r"^sess_[0-9a-f]{64}$")
+    agent_id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
     agent_name: str | None = Field(default=None, max_length=120)
     tool_name: str | None = Field(default=None, max_length=120)
     decision: AuditDecision

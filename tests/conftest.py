@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 import socket
+import os
 from collections.abc import Iterator
 from datetime import datetime
 
@@ -40,3 +41,26 @@ def block_external_network(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     yield
+
+
+@pytest.fixture
+def shared_redis_url() -> str:
+    value = os.getenv("TRPC_SHARED_REDIS_URL")
+    if not value:
+        pytest.skip("TRPC_SHARED_REDIS_URL is required for shared backend tests")
+    return value
+
+
+@pytest.fixture
+def shared_database_url() -> str:
+    value = os.getenv("TRPC_SHARED_DATABASE_URL")
+    if not value:
+        pytest.skip("TRPC_SHARED_DATABASE_URL is required for shared backend tests")
+    return value
+
+
+@pytest.fixture
+def shared_namespace() -> str:
+    from uuid import uuid4
+
+    return f"pytest-{uuid4().hex}"

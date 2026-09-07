@@ -114,7 +114,7 @@ async def test_rejected_http_requests_are_preauth_audited_and_metered(runtime_se
             content=raw,
             headers={**_signed_headers(raw, "incorrect-runtime-value"), "x-signature": "v1=" + "0" * 64},
         )
-    records = app.state.runtime.adapters.audit.list_preauth(PreAuthScope())
+    records = await app.state.runtime.adapters.audit.list_preauth(PreAuthScope())
     snapshot = app.state.runtime.metrics.snapshot(PreAuthScope())
     assert invalid.status_code == 400 and unauthorized.status_code == 401
     assert [record.decision.value for record in records] == ["invalid_request", "unauthorized"]

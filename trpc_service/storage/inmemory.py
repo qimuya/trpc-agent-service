@@ -31,7 +31,7 @@ class InMemoryIdempotencyRepository:
     def _key(key: IdempotencyKey) -> tuple[str, str, str]:
         return key.tenant_id, key.binding_id, key.external_message_id
 
-    def claim(self, key: IdempotencyKey, fingerprint: str, trace_id: UUID, now: object) -> ClaimResult:
+    async def claim(self, key: IdempotencyKey, fingerprint: str, trace_id: UUID, now: object) -> ClaimResult:
         storage_key = self._key(key)
         current = self._records.get(storage_key)
         if current is None:
@@ -50,7 +50,7 @@ class InMemoryIdempotencyRepository:
             return ClaimResult(disposition=ClaimDisposition.PROCESSING, original_trace_id=current.owner_trace_id)
         return ClaimResult(disposition=ClaimDisposition.COMPLETED, original_trace_id=current.execution_trace_id, result=current.result)
 
-    def mark_running(self, key: IdempotencyKey, owner_token: str, execution_trace_id: UUID, now: object) -> IdempotencyRecord:
+    async def mark_running(self, key: IdempotencyKey, owner_token: str, execution_trace_id: UUID, now: object) -> IdempotencyRecord:
         current = self._records[self._key(key)]
         if current.owner_trace_id != execution_trace_id:
             raise ConditionalWriteFailed("Idempotency transition was rejected.")
@@ -61,7 +61,7 @@ class InMemoryIdempotencyRepository:
         self._records[self._key(key)] = updated
         return updated
 
-    def mark_pre_start_failed(self, key: IdempotencyKey, owner_token: str, safe_error: str, now: object) -> IdempotencyRecord:
+    async def mark_pre_start_failed(self, key: IdempotencyKey, owner_token: str, safe_error: str, now: object) -> IdempotencyRecord:
         current = self._records[self._key(key)]
         try:
             updated = current.mark_pre_start_failed(owner_token, safe_error, now)
@@ -70,7 +70,7 @@ class InMemoryIdempotencyRepository:
         self._records[self._key(key)] = updated
         return updated
 
-    def complete(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
+    async def complete(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
         if self.fail_complete_once:
             self.fail_complete_once = False
             raise ConditionalWriteFailed("Terminal write outcome is uncertain.")
@@ -84,23 +84,23 @@ class InMemoryIdempotencyRepository:
         self._records[self._key(key)] = updated
         return updated
 
-    def mark_outcome_unknown(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
+    async def mark_outcome_unknown(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
         if result.status != ExecutionStatus.OUTCOME_UNKNOWN:
             raise ValueError("outcome-unknown transition requires an outcome-unknown result")
-        return self.complete(key, owner_token, result, now)
+        return await self.complete(key, owner_token, result, now)
 
-    def mark_post_start_failed(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
+    async def mark_post_start_failed(self, key: IdempotencyKey, owner_token: str, result: ExecutionResult, now: object) -> IdempotencyRecord:
         if result.status != ExecutionStatus.FAILED_POST_START:
             raise ValueError("post-start failure transition requires a failed result")
-        return self.complete(key, owner_token, result, now)
+        return await self.complete(key, owner_token, result, now)
 
-    def get(self, key: IdempotencyKey) -> IdempotencyRecord:
+    async def get(self, key: IdempotencyKey) -> IdempotencyRecord:
         try:
             return self._records[self._key(key)]
         except KeyError:
             raise NotFound("Idempotency record was not found.") from None
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         self._records.clear()
         self.fail_complete_once = False
 
@@ -125,7 +125,7 @@ class InMemoryAuditRepository:
         self.fail_on_append_number: int | None = None
         self.append_count = 0
 
-    def append(self, scope: TenantScope | PreAuthScope, record: AuditRecord) -> AuditRecord:
+    async def append(self, scope: TenantScope | PreAuthScope, record: AuditRecord, fence_proof: object | None = None) -> AuditRecord:
         self.append_count += 1
         if self.fail_append or self.append_count == self.fail_on_append_number:
             raise AuditUnavailable("Audit storage is unavailable.")
@@ -141,7 +141,10 @@ class InMemoryAuditRepository:
             raise AccessDenied("Audit scope is invalid.")
         return record
 
-    def update_final(self, scope: TenantScope, audit_id: UUID, trace_id: UUID, decision: object, **fields: object) -> AuditRecord:
+    async def append_diagnostic(self, scope: TenantScope | PreAuthScope, record: AuditRecord) -> AuditRecord:
+        return await self.append(scope, record)
+
+    async def update_final(self, scope: TenantScope, audit_id: UUID, trace_id: UUID, decision: object, **fields: object) -> AuditRecord:
         if not isinstance(scope, TenantScope):
             raise AccessDenied("Audit scope is invalid.")
         if self.fail_update:
@@ -157,27 +160,27 @@ class InMemoryAuditRepository:
                 return updated
         raise NotFound("Audit record was not found.")
 
-    def list_by_trace(self, scope: TenantScope, trace_id: UUID) -> list[AuditRecord]:
+    async def list_by_trace(self, scope: TenantScope, trace_id: UUID) -> list[AuditRecord]:
         if not isinstance(scope, TenantScope):
             raise AccessDenied("Audit scope is invalid.")
         return [record for record in self._tenant_records.get(scope.tenant_id, []) if record.trace_id == trace_id]
 
-    def list_by_session(self, scope: TenantScope, platform_session_id: str) -> list[AuditRecord]:
+    async def list_by_session(self, scope: TenantScope, platform_session_id: str) -> list[AuditRecord]:
         if not isinstance(scope, TenantScope):
             raise AccessDenied("Audit scope is invalid.")
         return [record for record in self._tenant_records.get(scope.tenant_id, []) if record.session_id == platform_session_id]
 
-    def list_by_tenant(self, scope: TenantScope) -> list[AuditRecord]:
+    async def list_by_tenant(self, scope: TenantScope) -> list[AuditRecord]:
         if not isinstance(scope, TenantScope):
             raise AccessDenied("Audit scope is invalid.")
         return list(self._tenant_records.get(scope.tenant_id, []))
 
-    def list_preauth(self, scope: PreAuthScope) -> list[AuditRecord]:
+    async def list_preauth(self, scope: PreAuthScope) -> list[AuditRecord]:
         if not isinstance(scope, PreAuthScope):
             raise AccessDenied("Audit scope is invalid.")
         return list(self._preauth_records)
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         self._tenant_records.clear()
         self._preauth_records.clear()
         self.fail_append = False
@@ -195,13 +198,26 @@ class InMemoryPlatformAdapters:
         self._tenants = {item.tenant_id: item for item in settings.tenants}
         self._agents = {(item.tenant_id, item.agent_id): item for item in settings.agents}
 
-    def get_auth_material(self, binding_id: str, channel: Channel = Channel.LOCAL_HTTP) -> BindingAuthMaterial:
+    async def get_auth_material(self, binding_id: str, channel: Channel = Channel.LOCAL_HTTP) -> BindingAuthMaterial:
         binding = self._bindings.get(binding_id)
         if binding is None or binding.channel != channel:
             raise NotFound("Binding was not found.")
         return BindingAuthMaterial(binding.binding_id, binding.secret_ref, binding.signature_version, binding.status)
 
-    def resolve_active_context(
+    async def resolve_active_context(
+        self,
+        scope: VerifiedBindingScope,
+        *,
+        external_user_id: str,
+        trace_id: UUID,
+    ) -> VerifiedTenantContext:
+        return self._resolve_active_context(
+            scope,
+            external_user_id=external_user_id,
+            trace_id=trace_id,
+        )
+
+    def _resolve_active_context(
         self,
         scope: VerifiedBindingScope,
         *,
@@ -229,7 +245,7 @@ class InMemoryPlatformAdapters:
             raise AccessDenied("Binding access denied.") from None
 
     def context_for_test(self, binding_id: str, external_user_id: str, trace_id: UUID) -> VerifiedTenantContext:
-        return self.resolve_active_context(
+        return self._resolve_active_context(
             VerifiedBindingScope._issue(binding_id=binding_id, channel=Channel.LOCAL_HTTP),
             external_user_id=external_user_id,
             trace_id=trace_id,

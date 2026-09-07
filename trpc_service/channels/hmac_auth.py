@@ -59,7 +59,7 @@ def verify_signature(
     return VerifiedBindingScope._issue(binding_id=binding_id, channel=Channel.LOCAL_HTTP)
 
 
-def verify_request(
+async def verify_request(
     *,
     binding_id: str,
     timestamp: str,
@@ -72,7 +72,7 @@ def verify_request(
 ) -> VerifiedBindingScope:
     _validate_public_fields(timestamp, signature, now or datetime.now(timezone.utc))
     try:
-        material = registry.get_auth_material(binding_id, Channel.LOCAL_HTTP)
+        material = await registry.get_auth_material(binding_id, Channel.LOCAL_HTTP)
         secret = resolver.resolve(material.secret_ref)
         value = secret.reveal()
     except Exception:

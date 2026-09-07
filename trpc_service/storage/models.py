@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from hashlib import sha256
 from typing import Self
 from uuid import UUID
@@ -27,6 +27,7 @@ class ClaimDisposition(StrEnum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     CONFLICT = "conflict"
+    OUTCOME_UNKNOWN = "outcome_unknown"
 
 
 class ExecutionStatus(StrEnum):
@@ -35,8 +36,65 @@ class ExecutionStatus(StrEnum):
     OUTCOME_UNKNOWN = "outcome_unknown"
 
 
+class ExecutionPhase(IntEnum):
+    CLAIMED = 1
+    PREPARED = 2
+    EXECUTION_STARTED = 3
+    FINALIZING = 4
+    TERMINAL = 5
+
+
+class RecoveryState(StrEnum):
+    TERMINAL_PENDING = "terminal_pending"
+    RECONCILED = "reconciled"
+    CONFLICT_REVIEW = "conflict_review"
+
+
 class _Frozen(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class NodeIdentity(_Frozen):
+    node_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+class MessageFence(_Frozen):
+    key_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation: int = Field(gt=0)
+    owner_node: NodeIdentity
+    owner_token: str = Field(min_length=16, repr=False)
+    owner_trace_id: UUID
+    expires_at: datetime
+
+
+class SessionFence(_Frozen):
+    session_key_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generation: int = Field(gt=0)
+    owner_node: NodeIdentity
+    owner_token: str = Field(min_length=16, repr=False)
+    expires_at: datetime
+
+
+class RecoveryMarker(_Frozen):
+    recovery_id: UUID
+    tenant_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    idempotency_key_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    message_generation: int = Field(gt=0)
+    session_generation: int = Field(gt=0)
+    execution_trace_id: UUID
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: RecoveryState
+    created_at: datetime
+    updated_at: datetime
+
+    def transition(
+        self, target: RecoveryState, now: datetime
+    ) -> "RecoveryMarker":
+        if self.state != RecoveryState.TERMINAL_PENDING:
+            raise ValueError("recovery marker is already terminal")
+        if target not in {RecoveryState.RECONCILED, RecoveryState.CONFLICT_REVIEW}:
+            raise ValueError("invalid recovery transition")
+        return self.model_copy(update={"state": target, "updated_at": now})
 
 
 class IdempotencyKey(_Frozen):
@@ -73,7 +131,9 @@ class IdempotencyRecord(_Frozen):
     content_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: IdempotencyState
     attempt: int = Field(ge=1)
-    owner_token: str | None
+    owner_token: str | None = Field(repr=False)
+    generation: int = Field(default=1, gt=0)
+    execution_phase: ExecutionPhase = ExecutionPhase.CLAIMED
     first_claim_trace_id: UUID
     owner_trace_id: UUID | None
     execution_trace_id: UUID | None = None
@@ -102,7 +162,7 @@ class IdempotencyRecord(_Frozen):
 
     def mark_running(self, owner_token: str, execution_trace_id: UUID, now: datetime) -> IdempotencyRecord:
         self._require(IdempotencyState.PENDING, owner_token)
-        return self.model_copy(update={"state": IdempotencyState.RUNNING, "execution_trace_id": execution_trace_id, "updated_at": now})
+        return self.model_copy(update={"state": IdempotencyState.RUNNING, "execution_phase": ExecutionPhase.EXECUTION_STARTED, "execution_trace_id": execution_trace_id, "updated_at": now})
 
     def mark_pre_start_failed(self, owner_token: str, safe_error: str, now: datetime) -> IdempotencyRecord:
         self._require(IdempotencyState.PENDING, owner_token)
@@ -111,12 +171,12 @@ class IdempotencyRecord(_Frozen):
     def reclaim(self, owner_token: str, trace_id: UUID, now: datetime) -> IdempotencyRecord:
         if self.state != IdempotencyState.FAILED_PRE_START:
             raise ValueError("invalid idempotency transition")
-        return self.model_copy(update={"state": IdempotencyState.PENDING, "attempt": self.attempt + 1, "owner_token": owner_token, "owner_trace_id": trace_id, "execution_trace_id": None, "result": None, "updated_at": now})
+        return self.model_copy(update={"state": IdempotencyState.PENDING, "attempt": self.attempt + 1, "generation": self.generation + 1, "execution_phase": ExecutionPhase.CLAIMED, "owner_token": owner_token, "owner_trace_id": trace_id, "execution_trace_id": None, "result": None, "updated_at": now})
 
     def complete(self, owner_token: str, result: ExecutionResult, now: datetime) -> IdempotencyRecord:
         self._require(IdempotencyState.RUNNING, owner_token)
         terminal = IdempotencyState(result.status.value)
-        return self.model_copy(update={"state": terminal, "owner_token": None, "owner_trace_id": None, "result": result, "updated_at": now})
+        return self.model_copy(update={"state": terminal, "execution_phase": ExecutionPhase.TERMINAL, "owner_token": None, "owner_trace_id": None, "result": result, "updated_at": now})
 
 
 class ClaimResult(_Frozen):

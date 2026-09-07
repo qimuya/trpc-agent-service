@@ -16,7 +16,7 @@ async def test_first_tenant_message_reaches_runner_audit_and_metrics(runtime_sec
     assert reply.status.value == "succeeded"
     assert reply.text == "stored:ALPHA"
     scope = runtime.tenant_scope("tenant-alpha")
-    decisions = [item.decision.value for item in runtime.adapters.audit.list_by_trace(scope, UUID(str(message.trace_id)))]
+    decisions = [item.decision.value for item in await runtime.adapters.audit.list_by_trace(scope, UUID(str(message.trace_id)))]
     assert decisions == ["authorized", "execution_started", "succeeded"]
     assert runtime.metrics.snapshot(scope).request_count == 1
     assert "state_backend" in runtime.metrics.snapshot(scope).stage_latency_ms
@@ -44,10 +44,12 @@ async def test_two_tenants_with_same_external_ids_keep_distinct_two_turn_context
     assert replies[0].platform_session_id == replies[2].platform_session_id
     assert replies[1].platform_session_id == replies[3].platform_session_id
     assert replies[0].platform_session_id != replies[1].platform_session_id
-    assert all(record.tenant_id == "tenant-alpha" for record in runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-alpha")))
-    assert all(record.tenant_id == "tenant-beta" for record in runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-beta")))
-    alpha_user = runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-alpha"))[0].user_id
-    beta_user = runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-beta"))[0].user_id
+    alpha_records = await runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-alpha"))
+    beta_records = await runtime.adapters.audit.list_by_tenant(runtime.tenant_scope("tenant-beta"))
+    assert all(record.tenant_id == "tenant-alpha" for record in alpha_records)
+    assert all(record.tenant_id == "tenant-beta" for record in beta_records)
+    alpha_user = alpha_records[0].user_id
+    beta_user = beta_records[0].user_id
     assert alpha_user != beta_user
     await runtime.close()
 
@@ -80,7 +82,7 @@ async def test_sequential_and_concurrent_duplicates_execute_once_and_conflict(ru
     assert conflict.status.value == "conflict"
     assert runtime.worker.call_count == 2
     assert all(reply.original_trace_id == initial.trace_id for reply in repeated)
-    duplicate_audit = runtime.adapters.audit.list_by_trace(
+    duplicate_audit = await runtime.adapters.audit.list_by_trace(
         runtime.tenant_scope("tenant-alpha"), repeated[0].trace_id
     )
     assert duplicate_audit[0].original_trace_id == initial.trace_id

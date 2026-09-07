@@ -14,7 +14,11 @@ import httpx
 import uvicorn
 
 from trpc_service.channels.hmac_auth import body_sha256, canonical_string, sign_request
-from trpc_service.web.app import create_app
+from trpc_service.config.settings import RuntimeProfile, load_runtime_settings
+from trpc_service.storage.postgres.database import PostgresDatabase
+from trpc_service.web.app import create_app, create_shared_app
+from trpc_service.config.settings import build_demo_settings
+from trpc_service.storage.postgres.repositories import PostgresConfigurationRepository
 
 
 def build_serve_parser() -> argparse.ArgumentParser:
@@ -30,6 +34,46 @@ def serve_main(argv: list[str] | None = None) -> int:
         raise SystemExit("The local validation service may only listen on loopback.")
     app = create_app(os.environ)
     uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+def build_shared_serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="trpc-agent-shared-serve")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--node-id", required=True)
+    return parser
+
+
+def shared_serve_main(argv: list[str] | None = None) -> int:
+    args = build_shared_serve_parser().parse_args(argv)
+    if args.host not in {"127.0.0.1", "localhost", "::1"}:
+        raise SystemExit("The shared validation service may only listen on loopback.")
+    runtime_environ = dict(os.environ)
+    runtime_environ["TRPC_RUNTIME_PROFILE"] = "shared"
+    runtime_environ["TRPC_NODE_ID"] = args.node_id
+    app = create_shared_app(runtime_environ)
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+async def _initialize_shared() -> None:
+    settings = load_runtime_settings(os.environ)
+    if settings.profile != RuntimeProfile.SHARED or settings.database_url is None:
+        raise SystemExit("Shared runtime configuration is required.")
+    database = PostgresDatabase(settings.database_url.get_secret_value())
+    try:
+        await database.initialize_schema()
+        await PostgresConfigurationRepository(database).seed(build_demo_settings())
+    finally:
+        await database.close()
+
+
+def shared_init_main(argv: list[str] | None = None) -> int:
+    argparse.ArgumentParser(prog="trpc-agent-shared-init").parse_args(argv)
+    import asyncio
+
+    asyncio.run(_initialize_shared())
     return 0
 
 

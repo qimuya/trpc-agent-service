@@ -20,31 +20,31 @@ def _record(tenant: str | None, trace: UUID, session: str | None = None) -> Audi
     )
 
 
-def test_audit_scope_isolation_queries_and_failure_injection() -> None:
+async def test_audit_scope_isolation_queries_and_failure_injection() -> None:
     repo = InMemoryAuditRepository()
     trace = UUID("11111111-1111-4111-8111-111111111111")
     alpha, beta = TenantScope(tenant_id="tenant-alpha"), TenantScope(tenant_id="tenant-beta")
     session = "sess_" + "a" * 64
-    record = repo.append(alpha, _record("tenant-alpha", trace, session))
-    repo.append(beta, _record("tenant-beta", trace))
-    repo.append(PreAuthScope(), _record(None, trace))
-    assert repo.list_by_trace(alpha, trace) == [record]
-    assert repo.list_by_session(alpha, session) == [record]
-    assert repo.list_by_tenant(alpha) == [record]
-    updated = repo.update_final(alpha, record.audit_id, trace, AuditDecision.SUCCEEDED, latency_ms=3)
+    record = await repo.append(alpha, _record("tenant-alpha", trace, session))
+    await repo.append(beta, _record("tenant-beta", trace))
+    await repo.append(PreAuthScope(), _record(None, trace))
+    assert await repo.list_by_trace(alpha, trace) == [record]
+    assert await repo.list_by_session(alpha, session) == [record]
+    assert await repo.list_by_tenant(alpha) == [record]
+    updated = await repo.update_final(alpha, record.audit_id, trace, AuditDecision.SUCCEEDED, latency_ms=3)
     assert updated.decision == AuditDecision.SUCCEEDED and updated.latency_ms == 3
     repo.fail_update = True
     with pytest.raises(AuditUnavailable):
-        repo.update_final(alpha, record.audit_id, trace, AuditDecision.AGENT_FAILED)
+        await repo.update_final(alpha, record.audit_id, trace, AuditDecision.AGENT_FAILED)
     repo.fail_update = False
     with pytest.raises(AccessDenied):
-        repo.append(alpha, _record("tenant-beta", trace))
+        await repo.append(alpha, _record("tenant-beta", trace))
     with pytest.raises(AccessDenied):
-        repo.list_by_trace(PreAuthScope(), trace)
+        await repo.list_by_trace(PreAuthScope(), trace)
     with pytest.raises(AccessDenied):
-        repo.list_preauth(alpha)
+        await repo.list_preauth(alpha)
     with pytest.raises(ValueError):
-        repo.update_final(alpha, record.audit_id, trace, AuditDecision.SUCCEEDED, secret="must-not-store")
+        await repo.update_final(alpha, record.audit_id, trace, AuditDecision.SUCCEEDED, secret="must-not-store")
     repo.fail_append = True
     with pytest.raises(AuditUnavailable):
-        repo.append(alpha, _record("tenant-alpha", trace))
+        await repo.append(alpha, _record("tenant-alpha", trace))
