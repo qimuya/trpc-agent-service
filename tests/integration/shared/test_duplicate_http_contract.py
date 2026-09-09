@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -24,7 +25,10 @@ async def test_two_http_nodes_expose_processing_cached_and_conflict_without_back
         url = "http://127.0.0.1"
         binding_id = "binding-alpha"
         secret_env = "TRPC_DEMO_ALPHA_SECRET"
-        external_message_id = "http-duplicate"
+        # The shared database intentionally survives test processes. Keep this
+        # scenario unique across runs while reusing the value inside this run
+        # to exercise processing/cached/conflict semantics.
+        external_message_id = f"http-duplicate-{uuid4().hex}"
         external_user_id = "http-user"
         conversation_type = "direct"
         external_conversation_id = "http-conversation"

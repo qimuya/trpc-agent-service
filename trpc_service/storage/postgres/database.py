@@ -14,7 +14,7 @@ from trpc_service.storage.contracts import ConfigurationUnavailable
 from trpc_service.storage.postgres.models import Base, SchemaMigrationRow
 
 
-SUPPORTED_SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSION = 4
 _MIGRATION_DIR = Path(__file__).with_name("migrations")
 
 
@@ -27,7 +27,10 @@ class PostgresDatabase:
     async def initialize_schema(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            current_version = await connection.scalar(select(func.max(SchemaMigrationRow.version)))
+            applied_versions = set(
+                (await connection.scalars(select(SchemaMigrationRow.version))).all()
+            )
+            current_version = max(applied_versions, default=None)
             if current_version is not None and current_version > SUPPORTED_SCHEMA_VERSION:
                 raise ConfigurationUnavailable()
             await connection.execute(
@@ -37,7 +40,7 @@ class PostgresDatabase:
                     applied_at=datetime.now(timezone.utc),
                 ).on_conflict_do_nothing(index_elements=["version"])
             )
-            if current_version is None or current_version < 2:
+            if 2 not in applied_versions:
                 source = (_MIGRATION_DIR / "002_audit_agent_scope.sql").read_text(encoding="utf-8")
                 for statement in (part.strip() for part in source.split(";")):
                     if statement:
@@ -45,6 +48,30 @@ class PostgresDatabase:
                 await connection.execute(
                     insert(SchemaMigrationRow).values(
                         version=2, name="002_audit_agent_scope",
+                        checksum=sha256(source.encode("utf-8")).hexdigest(),
+                        applied_at=datetime.now(timezone.utc),
+                    ).on_conflict_do_nothing(index_elements=["version"])
+                )
+            if 3 not in applied_versions:
+                source = (_MIGRATION_DIR / "003_dual_im.sql").read_text(encoding="utf-8")
+                for statement in (part.strip() for part in source.split(";")):
+                    if statement:
+                        await connection.execute(text(statement))
+                await connection.execute(
+                    insert(SchemaMigrationRow).values(
+                        version=3, name="003_dual_im",
+                        checksum=sha256(source.encode("utf-8")).hexdigest(),
+                        applied_at=datetime.now(timezone.utc),
+                    ).on_conflict_do_nothing(index_elements=["version"])
+                )
+            if 4 not in applied_versions:
+                source = (_MIGRATION_DIR / "004_preauth_audit_channel.sql").read_text(encoding="utf-8")
+                for statement in (part.strip() for part in source.split(";")):
+                    if statement:
+                        await connection.execute(text(statement))
+                await connection.execute(
+                    insert(SchemaMigrationRow).values(
+                        version=4, name="004_preauth_audit_channel",
                         checksum=sha256(source.encode("utf-8")).hexdigest(),
                         applied_at=datetime.now(timezone.utc),
                     ).on_conflict_do_nothing(index_elements=["version"])

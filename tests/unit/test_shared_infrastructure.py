@@ -22,6 +22,8 @@ def test_postgres_schema_contains_authoritative_and_recovery_tables() -> None:
         "channel_bindings",
         "persistent_audit_records",
         "recovery_markers",
+        "delivery_records",
+        "delivery_attempts",
     } <= set(Base.metadata.tables)
     sql = Path(
         "trpc_service/storage/postgres/migrations/001_shared_state.sql"
@@ -31,7 +33,16 @@ def test_postgres_schema_contains_authoritative_and_recovery_tables() -> None:
     migration = Path(
         "trpc_service/storage/postgres/migrations/002_audit_agent_scope.sql"
     ).read_text(encoding="utf-8")
-    assert SUPPORTED_SCHEMA_VERSION == 2
+    dual_im_migration = Path(
+        "trpc_service/storage/postgres/migrations/003_dual_im.sql"
+    ).read_text(encoding="utf-8")
+    preauth_migration = Path(
+        "trpc_service/storage/postgres/migrations/004_preauth_audit_channel.sql"
+    ).read_text(encoding="utf-8")
+    assert "delivery_records" in dual_im_migration
+    assert "delivery_attempts" in dual_im_migration
+    assert "ADD COLUMN IF NOT EXISTS channel" in preauth_migration
+    assert SUPPORTED_SCHEMA_VERSION == 4
     assert "ADD COLUMN IF NOT EXISTS agent_id" in migration
 
 
@@ -54,6 +65,25 @@ def test_redis_key_codec_is_scoped_and_hides_external_identifiers() -> None:
     assert alpha != beta
     assert "private-message-id" not in alpha
     assert alpha.startswith("pytest:")
+
+
+def test_legacy_idempotency_identity_defaults_to_local_http() -> None:
+    from types import SimpleNamespace
+
+    codec = RedisKeyCodec(namespace="compat")
+    legacy = SimpleNamespace(
+        tenant_id="tenant-alpha",
+        binding_id="binding-alpha",
+        external_message_id="message-1",
+    )
+    explicit = SimpleNamespace(
+        tenant_id="tenant-alpha",
+        channel="local_http",
+        binding_id="binding-alpha",
+        external_message_id="message-1",
+    )
+
+    assert codec.idempotency(legacy) == codec.idempotency(explicit)
 
 
 async def test_script_loader_recovers_from_noscript() -> None:

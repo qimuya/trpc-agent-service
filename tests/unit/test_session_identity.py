@@ -44,3 +44,28 @@ def test_explicit_session_ownership_rejects_mismatched_context() -> None:
     ):
         with pytest.raises(ValueError, match="ownership"):
             session_identity.assert_session_ownership(alpha, valid.model_copy(update={field: value}))
+
+
+def test_real_im_group_session_is_scoped_by_group_and_sender() -> None:
+    context = _context(user="group-user-a")
+    first = session_identity.derive_session_identity(
+        context, "group", "group-001", "group-user-a"
+    )
+    same = session_identity.derive_session_identity(
+        context, "group", "group-001", "group-user-a"
+    )
+    other_sender = session_identity.derive_session_identity(
+        context, "group", "group-001", "group-user-b"
+    )
+    other_group = session_identity.derive_session_identity(
+        context, "group", "group-002", "group-user-a"
+    )
+
+    assert first.platform_session_id == same.platform_session_id
+    assert len(
+        {
+            first.platform_session_id,
+            other_sender.platform_session_id,
+            other_group.platform_session_id,
+        }
+    ) == 3

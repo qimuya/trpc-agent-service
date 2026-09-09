@@ -19,7 +19,8 @@ def _digest(value: str) -> str:
 
 def _record(*, trace: UUID, audit_id: UUID | None = None,
             decision: AuditDecision = AuditDecision.SUCCEEDED,
-            external: str = "audit-message", diagnostic: bool = False) -> AuditRecord:
+            external: str | None = None, diagnostic: bool = False) -> AuditRecord:
+    provider_message_id = external or f"audit-message-{trace.hex}"
     return AuditRecord(
         audit_id=audit_id or uuid4(), trace_id=trace,
         first_claim_trace_id=trace, owner_trace_id=trace,
@@ -28,10 +29,10 @@ def _record(*, trace: UUID, audit_id: UUID | None = None,
         current_generation=2 if diagnostic else None,
         tenant_id="tenant-alpha", agent_id="agent-alpha",
         channel="local_http", binding_id_digest=_digest("binding-alpha"),
-        session_id="sess_" + "b" * 64,
+        session_id="sess_" + trace.hex + trace.hex,
         decision=decision, latency_ms=1, cost=Decimal("0"),
         error_type="stale_write" if diagnostic else None,
-        external_message_digest=_digest(external),
+        external_message_digest=_digest(provider_message_id),
         created_at=datetime.now(timezone.utc),
     )
 
@@ -51,7 +52,7 @@ async def test_persistent_audit_is_immutable_and_queryable_by_all_scopes(
         scope,
         _record(
             trace=trace, decision=AuditDecision.OUTCOME_UNKNOWN,
-            external="diagnostic-message", diagnostic=True,
+            external=f"diagnostic-message-{trace.hex}", diagnostic=True,
         ),
     )
 

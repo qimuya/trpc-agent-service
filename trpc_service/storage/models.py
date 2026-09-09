@@ -10,7 +10,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from trpc_service.channels.contracts import DeliveryAction, InboundMessage
+from trpc_service.channels.contracts import Channel, DeliveryAction, InboundMessage
+from trpc_service.channels.identity import ProviderReplyContext
 
 
 class IdempotencyState(StrEnum):
@@ -75,6 +76,148 @@ class SessionFence(_Frozen):
     expires_at: datetime
 
 
+class AdapterFence(_Frozen):
+    identity_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    node_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    generation: int = Field(gt=0)
+    owner_token: str = Field(min_length=16, repr=False)
+    expires_at: datetime
+
+
+class AdapterOwnershipPhase(StrEnum):
+    STANDBY = "standby"
+    CONNECTING = "connecting"
+    READY = "ready"
+    DRAINING = "draining"
+
+
+class AdapterOwnershipState(_Frozen):
+    identity_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    owner_node_id: str | None = Field(default=None, max_length=64)
+    generation: int = Field(ge=0)
+    phase: AdapterOwnershipPhase = AdapterOwnershipPhase.STANDBY
+    expires_in_ms: int = Field(default=0, ge=0)
+
+
+class DeliveryStatus(StrEnum):
+    PENDING = "pending"
+    SENDING = "sending"
+    RETRY_WAIT = "retry_wait"
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
+    DELIVERY_UNKNOWN = "delivery_unknown"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {
+            DeliveryStatus.DELIVERED,
+            DeliveryStatus.DELIVERY_FAILED,
+            DeliveryStatus.DELIVERY_UNKNOWN,
+        }
+
+
+class DeliveryOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    TRANSIENT = "transient"
+    PERMANENT = "permanent"
+    UNKNOWN = "unknown"
+    FENCE_REJECTED = "fence_rejected"
+
+
+class DeliveryRecord(_Frozen):
+    delivery_id: UUID
+    tenant_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
+    binding_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,95}$")
+    channel: Channel
+    idempotency_key_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_trace_id: UUID
+    reply_context: ProviderReplyContext
+    result_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: DeliveryStatus
+    adapter_generation: int = Field(gt=0)
+    next_attempt_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def validate_state(self) -> Self:
+        for name, value in (("created_at", self.created_at), ("updated_at", self.updated_at)):
+            if value.tzinfo is None or value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
+                raise ValueError(f"{name} must be UTC-aware")
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at cannot precede created_at")
+        if self.status == DeliveryStatus.RETRY_WAIT and self.next_attempt_at is None:
+            raise ValueError("retry_wait requires next_attempt_at")
+        if self.status != DeliveryStatus.RETRY_WAIT and self.next_attempt_at is not None:
+            raise ValueError("next_attempt_at is only valid for retry_wait")
+        return self
+
+    def transition(
+        self,
+        target: DeliveryStatus,
+        now: datetime,
+        *,
+        next_attempt_at: datetime | None = None,
+        adapter_generation: int | None = None,
+    ) -> "DeliveryRecord":
+        if self.status.terminal:
+            raise ValueError("delivery status is terminal")
+        allowed = {
+            DeliveryStatus.PENDING: {DeliveryStatus.SENDING},
+            DeliveryStatus.SENDING: {
+                DeliveryStatus.DELIVERED,
+                DeliveryStatus.RETRY_WAIT,
+                DeliveryStatus.DELIVERY_FAILED,
+                DeliveryStatus.DELIVERY_UNKNOWN,
+            },
+            DeliveryStatus.RETRY_WAIT: {DeliveryStatus.SENDING},
+        }
+        if target not in allowed.get(self.status, set()):
+            raise ValueError("invalid delivery transition")
+        return self.model_copy(
+            update={
+                "status": target,
+                "updated_at": now,
+                "next_attempt_at": next_attempt_at if target == DeliveryStatus.RETRY_WAIT else None,
+                "adapter_generation": adapter_generation or self.adapter_generation,
+            }
+        )
+
+
+class DeliveryAttempt(_Frozen):
+    attempt_id: UUID
+    delivery_id: UUID
+    attempt_no: int = Field(ge=1, le=4)
+    trace_id: UUID
+    adapter_node_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    adapter_generation: int = Field(gt=0)
+    started_at: datetime
+    finished_at: datetime | None = None
+    outcome: DeliveryOutcome | None = None
+    safe_error_code: str | None = Field(
+        default=None, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    retry_delay_seconds: int | None = None
+
+    @model_validator(mode="after")
+    def validate_attempt(self) -> Self:
+        values = [self.started_at]
+        if self.finished_at is not None:
+            values.append(self.finished_at)
+        if any(value.tzinfo is None or value.utcoffset() is None or value.utcoffset().total_seconds() != 0 for value in values):
+            raise ValueError("delivery attempt timestamps must be UTC-aware")
+        if self.finished_at is not None and self.finished_at < self.started_at:
+            raise ValueError("finished_at cannot precede started_at")
+        if self.outcome == DeliveryOutcome.TRANSIENT:
+            if self.retry_delay_seconds not in {1, 2, 4} or self.safe_error_code is None:
+                raise ValueError("transient outcome requires safe retry metadata")
+        elif self.retry_delay_seconds is not None:
+            raise ValueError("retry delay is only valid for transient outcome")
+        if self.outcome in {DeliveryOutcome.PERMANENT, DeliveryOutcome.UNKNOWN} and self.safe_error_code is None:
+            raise ValueError("failed outcome requires a safe error code")
+        return self
+
+
 class RecoveryMarker(_Frozen):
     recovery_id: UUID
     tenant_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -99,6 +242,7 @@ class RecoveryMarker(_Frozen):
 
 class IdempotencyKey(_Frozen):
     tenant_id: str
+    channel: Channel = Channel.LOCAL_HTTP
     binding_id: str
     external_message_id: str
 

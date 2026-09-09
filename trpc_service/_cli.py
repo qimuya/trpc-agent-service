@@ -3,22 +3,38 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+from hashlib import sha256
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import uvicorn
 
 from trpc_service.channels.hmac_auth import body_sha256, canonical_string, sign_request
-from trpc_service.config.settings import RuntimeProfile, load_runtime_settings
+from trpc_service.channels.contracts import Channel
+from trpc_service.audit.models import AuditRecord, TenantScope
+from trpc_service.config.settings import (
+    ConfigurationError,
+    PlatformSettings,
+    RuntimeProfile,
+    build_runtime_channel_binding,
+    load_runtime_settings,
+)
+from trpc_service.storage.contracts import ConfigurationUnavailable, SecretUnavailable
+from trpc_service.storage.models import NodeIdentity
 from trpc_service.storage.postgres.database import PostgresDatabase
 from trpc_service.web.app import create_app, create_shared_app
 from trpc_service.config.settings import build_demo_settings
-from trpc_service.storage.postgres.repositories import PostgresConfigurationRepository
+from trpc_service.storage.postgres.repositories import (
+    PostgresAuditRepository,
+    PostgresConfigurationRepository,
+)
 
 
 def build_serve_parser() -> argparse.ArgumentParser:
@@ -58,7 +74,10 @@ def shared_serve_main(argv: list[str] | None = None) -> int:
 
 
 async def _initialize_shared() -> None:
-    settings = load_runtime_settings(os.environ)
+    runtime_environ = dict(os.environ)
+    runtime_environ["TRPC_RUNTIME_PROFILE"] = "shared"
+    runtime_environ["TRPC_NODE_ID"] = "shared-init"
+    settings = load_runtime_settings(runtime_environ)
     if settings.profile != RuntimeProfile.SHARED or settings.database_url is None:
         raise SystemExit("Shared runtime configuration is required.")
     database = PostgresDatabase(settings.database_url.get_secret_value())
@@ -74,6 +93,164 @@ def shared_init_main(argv: list[str] | None = None) -> int:
     import asyncio
 
     asyncio.run(_initialize_shared())
+    return 0
+
+
+def build_shared_channel_init_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="trpc-agent-shared-channel-init")
+    parser.add_argument(
+        "--channel",
+        choices=(Channel.FEISHU.value, Channel.WECOM.value),
+        required=True,
+    )
+    return parser
+
+
+async def _initialize_shared_channel_binding(channel: Channel):
+    runtime_environ = dict(os.environ)
+    runtime_environ["TRPC_RUNTIME_PROFILE"] = "shared"
+    runtime_environ["TRPC_NODE_ID"] = "shared-channel-init"
+    settings = load_runtime_settings(runtime_environ)
+    if settings.profile != RuntimeProfile.SHARED or settings.database_url is None:
+        raise ConfigurationUnavailable("Shared runtime configuration is required.")
+    binding = build_runtime_channel_binding(channel, os.environ)
+    database = PostgresDatabase(settings.database_url.get_secret_value())
+    try:
+        await database.verify_schema()
+        await PostgresConfigurationRepository(database).seed(
+            PlatformSettings(tenants=(), agents=(), bindings=(binding,))
+        )
+        return binding
+    finally:
+        await database.close()
+
+
+def shared_channel_init_main(argv: list[str] | None = None) -> int:
+    args = build_shared_channel_init_parser().parse_args(argv)
+    try:
+        binding = asyncio.run(_initialize_shared_channel_binding(Channel(args.channel)))
+    except (ConfigurationError, ConfigurationUnavailable):
+        print(
+            json.dumps(
+                {
+                    "channel": args.channel,
+                    "status": "failed",
+                    "error": "configuration_unavailable",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 2
+    print(
+        json.dumps(
+            {
+                "channel": args.channel,
+                "binding_id": binding.binding_id,
+                "identity_digest": binding.channel_identity_digest,
+                "status": binding.status.value,
+            },
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def build_channel_serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="trpc-agent-channel-serve")
+    parser.add_argument("--channel", choices=(Channel.FEISHU.value, Channel.WECOM.value), required=True)
+    parser.add_argument("--node-id", required=True)
+    return parser
+
+
+def channel_serve_main(argv: list[str] | None = None) -> int:
+    args = build_channel_serve_parser().parse_args(argv)
+    from trpc_service.channels.runtime import run_channel_process
+
+    try:
+        return asyncio.run(
+            run_channel_process(
+                Channel(args.channel),
+                NodeIdentity(node_id=args.node_id),
+                os.environ,
+            )
+        )
+    except (ConfigurationUnavailable, SecretUnavailable):
+        print(json.dumps({"channel": args.channel, "readiness": "not_ready", "error": "configuration_unavailable"}, separators=(",", ":")))
+        return 2
+
+
+def build_trace_diagnostic_summary(
+    scope: TenantScope,
+    trace_id: UUID,
+    records: list[AuditRecord],
+) -> dict[str, object]:
+    """Return only bounded and pseudonymous trace evidence."""
+
+    tenant_digest = "sha256:" + sha256(scope.tenant_id.encode("utf-8")).hexdigest()[:16]
+    items: list[dict[str, object]] = []
+    for record in records:
+        item = {
+            "decision": record.decision.value,
+            "channel": record.channel.value,
+            "audit_kind": record.audit_kind,
+            "first_claim_trace_id": (
+                str(record.first_claim_trace_id) if record.first_claim_trace_id else None
+            ),
+            "owner_trace_id": str(record.owner_trace_id) if record.owner_trace_id else None,
+            "execution_trace_id": (
+                str(record.execution_trace_id) if record.execution_trace_id else None
+            ),
+            "message_generation": record.generation,
+            "session_id": record.session_id,
+            "adapter_node_id": record.adapter_node_id,
+            "adapter_generation": record.adapter_generation,
+            "delivery_id": str(record.delivery_id) if record.delivery_id else None,
+            "delivery_attempt_no": record.delivery_attempt_no,
+            "delivery_status": record.delivery_status,
+            "error_type": record.error_type,
+        }
+        items.append({key: value for key, value in item.items() if value is not None})
+    return {
+        "tenant_digest": tenant_digest,
+        "trace_id": str(trace_id),
+        "record_count": len(items),
+        "records": items,
+    }
+
+
+def build_trace_diagnose_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="trpc-agent-trace-diagnose")
+    parser.add_argument("--tenant-id", required=True)
+    parser.add_argument("--trace-id", required=True, type=UUID)
+    parser.add_argument("--node-id", default="trace-diagnostic")
+    return parser
+
+
+async def _diagnose_trace(args: object, environ: object) -> dict[str, object]:
+    settings = load_runtime_settings(environ)
+    if settings.profile != RuntimeProfile.SHARED or settings.database_url is None:
+        raise ConfigurationUnavailable("Shared runtime configuration is required.")
+    database = PostgresDatabase(settings.database_url.get_secret_value())
+    try:
+        await database.verify_schema()
+        scope = TenantScope(tenant_id=getattr(args, "tenant_id"))
+        records = await PostgresAuditRepository(
+            database, node_id=getattr(args, "node_id")
+        ).list_by_trace(scope, getattr(args, "trace_id"))
+        return build_trace_diagnostic_summary(scope, getattr(args, "trace_id"), records)
+    finally:
+        await database.close()
+
+
+def trace_diagnose_main(argv: list[str] | None = None) -> int:
+    args = build_trace_diagnose_parser().parse_args(argv)
+    try:
+        payload = asyncio.run(_diagnose_trace(args, os.environ))
+    except ConfigurationUnavailable:
+        payload = {"status": "failed", "error": "configuration_unavailable"}
+        print(json.dumps(payload, separators=(",", ":")))
+        return 2
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     return 0
 
 
@@ -155,3 +332,28 @@ def send_main(argv: list[str] | None = None) -> int:
         return 2
     print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
     return 0 if response.status_code < 400 else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        raise SystemExit("A command is required.")
+    command, rest = arguments[0], arguments[1:]
+    commands = {
+        "shared-init": shared_init_main,
+        "shared-channel-init": shared_channel_init_main,
+        "shared-serve": shared_serve_main,
+        "channel-serve": channel_serve_main,
+        "trace-diagnose": trace_diagnose_main,
+        "local-serve": serve_main,
+        "local-send": send_main,
+    }
+    try:
+        handler = commands[command]
+    except KeyError:
+        raise SystemExit("Unknown command.") from None
+    return handler(rest)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

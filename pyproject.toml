@@ -11,12 +11,14 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "asyncpg==0.31.0",
     "httpx==0.28.1",
+    "lark-channel-sdk==1.4.0",
     "pydantic==2.13.5",
     "redis==8.1.0",
     "sqlalchemy==2.0.52",
     "starlette==1.6.0",
     "trpc-agent-py==1.1.19",
     "uvicorn==0.52.4",
+    "wecom-aibot-python-sdk==1.0.2",
 ]
 
 [project.scripts]
@@ -24,7 +26,10 @@ trpc-agent-sdk-validate = "trpc_service.agent.sdk_validation:main"
 trpc-agent-local-serve = "trpc_service._cli:serve_main"
 trpc-agent-local-send = "trpc_service._cli:send_main"
 trpc-agent-shared-init = "trpc_service._cli:shared_init_main"
+trpc-agent-shared-channel-init = "trpc_service._cli:shared_channel_init_main"
 trpc-agent-shared-serve = "trpc_service._cli:shared_serve_main"
+trpc-agent-channel-serve = "trpc_service._cli:channel_serve_main"
+trpc-agent-trace-diagnose = "trpc_service._cli:trace_diagnose_main"
 
 [dependency-groups]
 dev = [

@@ -10,11 +10,69 @@ from typing import Mapping
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from trpc_service.storage.models import NodeIdentity
+from trpc_service.channels.contracts import Channel
+from trpc_service.channels.identity import ChannelIdentity
+from trpc_service.storage.contracts import SecretBytes, SecretUnavailable
 from trpc_service.tenant.models import AgentApplication, ChannelBinding, ResourceStatus, Tenant
 
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+class EnvironmentSecretProvider:
+    """Resolve short-lived credentials without retaining printable values."""
+
+    __slots__ = ("__source",)
+
+    def __init__(self, source: Mapping[str, str] | None = None) -> None:
+        self.__source = process_environ if source is None else source
+
+    def resolve(self, secret_ref: str) -> SecretBytes:
+        value = self.__source.get(secret_ref, "").strip()
+        if not value:
+            raise SecretUnavailable("Channel credential is unavailable.")
+        return SecretBytes(value.encode("utf-8"))
+
+    def __repr__(self) -> str:
+        return "EnvironmentSecretProvider(<redacted>)"
+
+
+class ChannelCredentialSettings(BaseModel):
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        frozen=True,
+    )
+
+    channel: Channel
+    app_or_bot_id: SecretBytes = Field(repr=False)
+    secret: SecretBytes = Field(repr=False)
+
+    def __repr__(self) -> str:
+        return f"ChannelCredentialSettings(channel={self.channel.value!r}, credentials=<redacted>)"
+
+
+def load_channel_credentials(
+    channel: Channel,
+    provider: EnvironmentSecretProvider | None = None,
+) -> ChannelCredentialSettings:
+    resolver = provider or EnvironmentSecretProvider()
+    references = {
+        Channel.FEISHU: ("LARK_APP_ID", "LARK_APP_SECRET"),
+        Channel.WECOM: ("WECOM_BOT_ID", "WECOM_BOT_SECRET"),
+    }
+    try:
+        identifier_ref, secret_ref = references[channel]
+        identifier = resolver.resolve(identifier_ref)
+        secret = resolver.resolve(secret_ref)
+    except (KeyError, SecretUnavailable):
+        raise SecretUnavailable("Channel credential is unavailable.") from None
+    return ChannelCredentialSettings(
+        channel=channel,
+        app_or_bot_id=identifier,
+        secret=secret,
+    )
 
 
 class RuntimeProfile(StrEnum):
@@ -91,6 +149,56 @@ class PlatformSettings(BaseModel):
     agents: tuple[AgentApplication, ...]
     bindings: tuple[ChannelBinding, ...]
     model_credentials_required: bool = False
+
+
+def build_runtime_channel_binding(
+    channel: Channel,
+    environ: Mapping[str, str] | None = None,
+) -> ChannelBinding:
+    """Build a real-IM binding without persisting credential values."""
+
+    source = process_environ if environ is None else environ
+    references = {
+        Channel.FEISHU: (
+            "LARK_TENANT_KEY",
+            "LARK_APP_ID",
+            "LARK_APP_SECRET",
+            "binding-feishu-real",
+        ),
+        Channel.WECOM: (
+            "WECOM_CORP_ID",
+            "WECOM_BOT_ID",
+            "WECOM_BOT_SECRET",
+            "binding-wecom-real",
+        ),
+    }
+    try:
+        tenant_key_ref, identifier_ref, secret_ref, binding_id = references[channel]
+    except KeyError:
+        raise ConfigurationError("A real IM channel is required.") from None
+    tenant_key = source.get(tenant_key_ref, "").strip()
+    identifier = source.get(identifier_ref, "").strip()
+    secret_available = bool(source.get(secret_ref, "").strip())
+    if not tenant_key or not identifier or not secret_available:
+        raise ConfigurationError("Real channel configuration is unavailable.")
+    identity = ChannelIdentity(
+        channel=channel,
+        provider_tenant_key=tenant_key,
+        provider_app_or_bot_id=identifier,
+    )
+    return ChannelBinding(
+        binding_id=binding_id,
+        tenant_id="tenant-alpha",
+        agent_id="agent-alpha",
+        channel=channel,
+        status=ResourceStatus.ACTIVE,
+        secret_ref=secret_ref,
+        signature_version="v1",
+        provider_tenant_key=identity.provider_tenant_key,
+        provider_app_or_bot_id=identity.provider_app_or_bot_id,
+        channel_identity_digest=identity.identity_digest,
+        created_at=datetime.now(timezone.utc),
+    )
 
 
 def build_demo_settings() -> PlatformSettings:

@@ -89,12 +89,24 @@ class LeaseLost(PlatformPortError):
     pass
 
 
+class LeaseBusy(PlatformPortError):
+    pass
+
+
 class StaleFence(PlatformPortError):
     pass
 
 
 class RecoveryConflict(PlatformPortError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedChannelBinding:
+    scope: VerifiedBindingScope
+    context: VerifiedTenantContext
+    secret_ref: str
+    config_version: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +221,61 @@ class RecoveryRepository(Protocol):
     async def get_pending(self, tenant_scope: Any, limit: int) -> list[Any]: ...
     async def mark_reconciled(self, tenant_scope: Any, recovery_id: UUID, expected_result_digest: str) -> Any: ...
     async def mark_conflict_review(self, tenant_scope: Any, recovery_id: UUID, safe_reason: str) -> Any: ...
+
+
+@runtime_checkable
+class ChannelBindingRepository(Protocol):
+    async def resolve_by_channel_identity(
+        self,
+        identity: Any,
+        *,
+        external_user_id: str,
+        trace_id: UUID,
+    ) -> ResolvedChannelBinding: ...
+
+
+@runtime_checkable
+class DeliveryRepository(Protocol):
+    async def create_or_get(
+        self,
+        tenant_scope: Any,
+        binding_scope: Any,
+        execution_result: Any,
+        reply_context: Any,
+        adapter_fence: Any,
+    ) -> Any: ...
+    async def begin_attempt(
+        self,
+        tenant_scope: Any,
+        delivery_id: UUID,
+        expected_status: Any,
+        adapter_fence: Any,
+        trace_id: UUID,
+    ) -> Any: ...
+    async def finish_attempt(
+        self,
+        tenant_scope: Any,
+        attempt_id: UUID,
+        outcome: Any,
+        safe_error_code: str | None,
+        retry_delay_seconds: int | None,
+        adapter_fence: Any,
+    ) -> Any: ...
+    async def get(self, tenant_scope: Any, delivery_id: UUID) -> Any: ...
+    async def list_due(self, tenant_scope: Any, now: datetime, limit: int) -> list[Any]: ...
+
+
+@runtime_checkable
+class AdapterLeaseHandle(Protocol):
+    async def renew(self, lease_ms: int) -> Any: ...
+    async def mark_ready(self, runtime_bot_identity: Any) -> Any: ...
+    async def release(self, reason: str) -> None: ...
+
+
+@runtime_checkable
+class AdapterOwnershipRepository(Protocol):
+    async def acquire(self, identity_digest: str, node_id: str, lease_ms: int) -> Any: ...
+    async def inspect(self, identity_digest: str) -> Any: ...
 
 
 @runtime_checkable

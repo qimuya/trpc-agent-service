@@ -152,6 +152,45 @@ uv run trpc-agent-shared-serve --node-id worker-a --host 127.0.0.1 --port 8001
 本阶段仍不包含真实企业微信、向量库、Kubernetes、管理后台、真实模型 API 或生产级
 Telemetry，也不宣称生产 HA 或跨 Redis/PostgreSQL 的生产 exactly-once。
 
+## 第五阶段：飞书与企业微信真实通道闭环
+
+仓库现已实现统一的飞书/企业微信 Channel Adapter、可信复合 Channel Identity、
+群聊 sender 级 Session、共享幂等与恢复、Delivery 1/2/4 秒重试、主动/备用
+Adapter ownership fencing，以及贯穿 Adapter、Gateway、Worker 和 Delivery 的
+租户作用域 Audit。供应商 SDK 对象不会进入 Gateway 或 Worker。
+
+共享后端和临时凭证配置完成后，可分别启动两个 Worker 和每个通道的主备 Adapter：
+
+```powershell
+uv run trpc-agent-shared-init
+uv run trpc-agent-shared-serve --node-id worker-a --port 8001
+uv run trpc-agent-shared-serve --node-id worker-b --port 8002
+uv run trpc-agent-channel-serve --channel feishu --node-id feishu-a
+uv run trpc-agent-channel-serve --channel feishu --node-id feishu-b
+uv run trpc-agent-channel-serve --channel wecom --node-id wecom-a
+uv run trpc-agent-channel-serve --channel wecom --node-id wecom-b
+```
+
+按租户和 trace 查询时，只输出摘要、generation、Session 摘要和 Delivery 状态：
+
+```powershell
+uv run trpc-agent-trace-diagnose --tenant-id tenant-alpha --trace-id <trace-uuid>
+```
+
+不依赖真实 IM 凭证的自动化门禁和安全扫描：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File specs/005-dual-im-real-channel-flow/scripts/run-automated-validation.ps1
+powershell -ExecutionPolicy Bypass -File specs/005-dual-im-real-channel-flow/scripts/scan-sensitive-material.ps1
+```
+
+完整环境变量、故障矩阵、双客户端和主备接管步骤见
+[`specs/005-dual-im-real-channel-flow/quickstart.md`](specs/005-dual-im-real-channel-flow/quickstart.md)，
+当前自动化结果与人工验收缺口见
+[`specs/005-dual-im-real-channel-flow/阶段成果记录.md`](specs/005-dual-im-real-channel-flow/阶段成果记录.md)。
+真实客户端、真实 Redis/PostgreSQL 与人工截图结果必须在对应环境实际执行后填写；
+仓库中的 SDK 替身通过结果不能替代真实平台验收。
+
 ## 代码目录
 
 ```txt

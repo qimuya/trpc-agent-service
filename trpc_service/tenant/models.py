@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from trpc_service.channels.contracts import Channel
 
@@ -60,6 +60,23 @@ class ChannelBinding(_CreatedAtModel):
     status: ResourceStatus
     secret_ref: str = Field(pattern=r"^[A-Z][A-Z0-9_]{0,127}$")
     signature_version: Literal["v1"]
+    provider_tenant_key: str | None = Field(default=None, min_length=1, max_length=128)
+    provider_app_or_bot_id: str | None = Field(default=None, min_length=1, max_length=128)
+    channel_identity_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    config_version: int = Field(default=1, gt=0)
+
+    @model_validator(mode="after")
+    def validate_provider_identity(self) -> Self:
+        fields = (
+            self.provider_tenant_key,
+            self.provider_app_or_bot_id,
+            self.channel_identity_digest,
+        )
+        if self.channel.is_real_im and any(value is None for value in fields):
+            raise ValueError("real IM binding requires a complete provider identity")
+        if self.channel == Channel.LOCAL_HTTP and any(value is not None for value in fields):
+            raise ValueError("local HTTP binding cannot contain provider identity")
+        return self
 
 
 class VerifiedTenantContext(_DomainModel):

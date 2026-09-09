@@ -92,6 +92,9 @@ class ChannelBindingRow(Base):
     config_version: Mapped[int] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    provider_tenant_key: Mapped[str | None] = mapped_column(String(128))
+    provider_app_or_bot_id: Mapped[str | None] = mapped_column(String(128))
+    channel_identity_digest: Mapped[str | None] = mapped_column(String(64))
 
 
 class PersistentAuditRecordRow(Base):
@@ -122,6 +125,7 @@ class PersistentAuditRecordRow(Base):
     execution_trace_id: Mapped[str | None] = mapped_column(String(36))
     tenant_id: Mapped[str | None] = mapped_column(String(64))
     agent_id: Mapped[str | None] = mapped_column(String(64))
+    channel: Mapped[str] = mapped_column(String(32), default="local_http")
     node_id: Mapped[str] = mapped_column(String(64))
     process_instance_id: Mapped[str] = mapped_column(String(36))
     binding_id_digest: Mapped[str] = mapped_column(String(71))
@@ -137,6 +141,13 @@ class PersistentAuditRecordRow(Base):
     cost: Mapped[Decimal] = mapped_column(Numeric)
     recovery_status: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    adapter_node_id: Mapped[str | None] = mapped_column(String(64))
+    adapter_generation: Mapped[int | None] = mapped_column(BigInteger)
+    channel_identity_digest: Mapped[str | None] = mapped_column(String(64))
+    provider_message_digest: Mapped[str | None] = mapped_column(String(71))
+    delivery_id: Mapped[str | None] = mapped_column(String(36))
+    delivery_attempt_no: Mapped[int | None] = mapped_column(BigInteger)
+    delivery_status: Mapped[str | None] = mapped_column(String(32))
 
 
 class RecoveryMarkerRow(Base):
@@ -171,3 +182,65 @@ class RecoveryMarkerRow(Base):
     failure_stage: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DeliveryRecordRow(Base):
+    __tablename__ = "delivery_records"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'retry_wait', 'delivered', "
+            "'delivery_failed', 'delivery_unknown')"
+        ),
+        CheckConstraint("adapter_generation > 0"),
+        UniqueConstraint(
+            "tenant_id",
+            "idempotency_key_digest",
+            "channel",
+            "binding_id",
+            name="uq_delivery_execution_scope",
+        ),
+        Index("ix_delivery_due", "tenant_id", "status", "next_attempt_at"),
+        Index("ix_delivery_execution_trace", "tenant_id", "execution_trace_id"),
+    )
+
+    delivery_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), ForeignKey("tenants.tenant_id"))
+    binding_id: Mapped[str] = mapped_column(
+        String(96), ForeignKey("channel_bindings.binding_id")
+    )
+    channel: Mapped[str] = mapped_column(String(32))
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64))
+    execution_trace_id: Mapped[str] = mapped_column(String(36))
+    reply_context: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result_digest: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(32))
+    adapter_generation: Mapped[int] = mapped_column(BigInteger)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DeliveryAttemptRow(Base):
+    __tablename__ = "delivery_attempts"
+    __table_args__ = (
+        CheckConstraint("attempt_no BETWEEN 1 AND 4"),
+        CheckConstraint("adapter_generation > 0"),
+        CheckConstraint("retry_delay_seconds IS NULL OR retry_delay_seconds IN (1, 2, 4)"),
+        UniqueConstraint(
+            "delivery_id", "attempt_no", name="uq_delivery_attempt_number"
+        ),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    delivery_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("delivery_records.delivery_id")
+    )
+    attempt_no: Mapped[int] = mapped_column(BigInteger)
+    trace_id: Mapped[str] = mapped_column(String(36))
+    adapter_node_id: Mapped[str] = mapped_column(String(64))
+    adapter_generation: Mapped[int] = mapped_column(BigInteger)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(String(32))
+    safe_error_code: Mapped[str | None] = mapped_column(String(64))
+    retry_delay_seconds: Mapped[int | None] = mapped_column(BigInteger)

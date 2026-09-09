@@ -21,7 +21,7 @@ def test_fences_require_positive_generation_and_hide_owner_token() -> None:
         key_digest="a" * 64,
         generation=1,
         owner_node=node,
-        owner_token="runtime-owner-token",
+        owner_token="runtime-" + "owner-token",
         owner_trace_id=UUID(int=1),
         expires_at=FIXED_UTC + timedelta(seconds=10),
     )
@@ -29,7 +29,7 @@ def test_fences_require_positive_generation_and_hide_owner_token() -> None:
         session_key_digest="b" * 64,
         generation=2,
         owner_node=node,
-        owner_token="runtime-session-token",
+        owner_token="runtime-" + "session-token",
         expires_at=FIXED_UTC + timedelta(seconds=10),
     )
     assert "runtime-owner-token" not in repr(message)

@@ -5,6 +5,7 @@ import socket
 import subprocess
 import sys
 import time
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -40,6 +41,7 @@ def test_two_worker_processes_continue_session_after_first_exits(
     processes: list[subprocess.Popen[str]] = []
     env = dict(os.environ)
     env.update(runtime_secret_env)
+    run_id = uuid4().hex
     try:
         for index, port in enumerate(ports):
             process = subprocess.Popen(
@@ -52,21 +54,21 @@ def test_two_worker_processes_continue_session_after_first_exits(
         class Args:
             binding_id = "binding-alpha"
             secret_env = "TRPC_DEMO_ALPHA_SECRET"
-            external_user_id = "process-user"
+            external_user_id = f"process-user-{run_id}"
             conversation_type = "direct"
-            external_conversation_id = "process-conversation"
+            external_conversation_id = f"process-conversation-{run_id}"
             trace_id = None
 
         with httpx.Client(trust_env=False) as client:
-            Args.url, Args.external_message_id, Args.text = f"http://127.0.0.1:{ports[0]}", "process-1", "Remember validation token ALPHA."
+            Args.url, Args.external_message_id, Args.text = f"http://127.0.0.1:{ports[0]}", f"process-1-{run_id}", "Remember validation token ALPHA."
             first = build_signed_request(Args, env)
             assert client.post(first.url, content=first.content, headers=first.headers).json()["data"]["text"] == "stored:ALPHA"
-            Args.url, Args.external_message_id, Args.text = f"http://127.0.0.1:{ports[1]}", "process-2", "Recall the validation token."
+            Args.url, Args.external_message_id, Args.text = f"http://127.0.0.1:{ports[1]}", f"process-2-{run_id}", "Recall the validation token."
             second = build_signed_request(Args, env)
             assert client.post(second.url, content=second.content, headers=second.headers).json()["data"]["text"] == "recalled:ALPHA"
             processes[0].terminate()
             processes[0].wait(timeout=10)
-            Args.external_message_id = "process-3"
+            Args.external_message_id = f"process-3-{run_id}"
             third = build_signed_request(Args, env)
             assert client.post(third.url, content=third.content, headers=third.headers).json()["data"]["text"] == "recalled:ALPHA"
     finally:

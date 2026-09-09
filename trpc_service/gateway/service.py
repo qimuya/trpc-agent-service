@@ -85,7 +85,8 @@ class GatewayService:
         generation = None
         try:
             state = await self.adapters.idempotency.get(IdempotencyKey(
-                tenant_id=scope.tenant_id, binding_id=message.binding_id,
+                tenant_id=scope.tenant_id, channel=message.channel,
+                binding_id=message.binding_id,
                 external_message_id=message.external_message_id,
             ))
             first_trace, owner_trace = state.first_claim_trace_id, state.owner_trace_id
@@ -171,8 +172,18 @@ class GatewayService:
             trace_id=message.trace_id,
         )
         scope = TenantScope.from_context(context)
-        identity = derive_session_identity(context, message.conversation_type, message.external_conversation_id)
-        key = IdempotencyKey(tenant_id=context.tenant_id, binding_id=context.binding_id, external_message_id=message.external_message_id)
+        identity = derive_session_identity(
+            context,
+            message.conversation_type,
+            message.external_conversation_id,
+            message.group_sender_id,
+        )
+        key = IdempotencyKey(
+            tenant_id=context.tenant_id,
+            channel=message.channel,
+            binding_id=context.binding_id,
+            external_message_id=message.external_message_id,
+        )
         claim = await self.adapters.idempotency.claim(key, content_fingerprint(message), message.trace_id, self._now())
         if claim.disposition == ClaimDisposition.CONFLICT:
             await self._audit(scope, message, context, AuditDecision.IDEMPOTENCY_CONFLICT, session_id=identity.platform_session_id)

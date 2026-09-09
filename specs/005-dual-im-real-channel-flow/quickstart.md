@@ -3,8 +3,9 @@
 **功能**：005-dual-im-real-channel-flow
 **用途**：在实现完成后重复验证飞书和企业微信真实消息闭环
 
-> 当前状态：Git 实现基线已经整理完成，但第五阶段代码尚未实现；执行真实连接前
-> 必须完成测试凭证轮换。不得把尚未运行的实现或验收结果写成已通过。
+> 当前状态：第五阶段离线实现与自动化门禁已完成；2026-09-08 的结果为
+> `218 passed, 28 skipped`。28 个 skip、真实双客户端和人工接管仍需在具备
+> Redis/PostgreSQL 与轮换后凭证的环境执行，不得写成已通过。
 
 ## 1. 实现基线准备
 
@@ -19,9 +20,9 @@ uv sync --group dev
 uv run pytest -q
 ~~~
 
-预期：分支为 005-dual-im-real-channel-flow，merge-base 检查成功，001、002、003
-测试无失败。规划时离线回归为 139 passed、26 skipped；共享后端用例需启动
-Redis/PostgreSQL 后补跑。若基线测试失败，不开始第五阶段实现。
+预期：分支为 005-dual-im-real-channel-flow，merge-base 检查成功，001、002、003、005
+测试无失败。当前离线回归为 218 passed、28 skipped；共享后端用例需启动
+Redis/PostgreSQL 后补跑。若回归失败，不开始真实客户端验收。
 
 ## 2. 安全前置条件
 
@@ -50,15 +51,40 @@ wecom-aibot-python-sdk==1.0.2
 uv sync --group dev
 ~~~
 
-真实凭证只在当前终端或受控 Secret Provider 中设置。文档不提供也不保存具体值。
+真实凭证只在当前终端或受控 Secret Provider 中设置。以下函数通过安全提示读取值，
+不会把输入回显到屏幕或写入 PowerShell 命令历史；不要把占位符替换成真实值后保存脚本。
 
 ~~~powershell
-$env:LARK_APP_ID = "<从安全位置读取>"
-$env:LARK_APP_SECRET = "<从安全位置读取>"
-$env:WECOM_BOT_ID = "<从安全位置读取>"
-$env:WECOM_BOT_SECRET = "<从安全位置读取>"
-$env:TRPC_REDIS_URL = "<本地共享后端地址>"
-$env:TRPC_POSTGRES_DSN = "<本地共享后端地址>"
+function Set-ProcessSecret([string]$Name) {
+    $secureValue = Read-Host "输入 $Name" -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureValue)
+    try {
+        [Environment]::SetEnvironmentVariable(
+            $Name,
+            [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer),
+            "Process"
+        )
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+        $secureValue.Dispose()
+    }
+}
+
+Set-ProcessSecret "TRPC_DEMO_REDIS_PASSWORD"
+Set-ProcessSecret "TRPC_DEMO_POSTGRES_PASSWORD"
+Set-ProcessSecret "LARK_TENANT_KEY"
+Set-ProcessSecret "LARK_APP_ID"
+Set-ProcessSecret "LARK_APP_SECRET"
+Set-ProcessSecret "WECOM_CORP_ID"
+Set-ProcessSecret "WECOM_BOT_ID"
+Set-ProcessSecret "WECOM_BOT_SECRET"
+
+$redisPassword = [Uri]::EscapeDataString($env:TRPC_DEMO_REDIS_PASSWORD)
+$postgresPassword = [Uri]::EscapeDataString($env:TRPC_DEMO_POSTGRES_PASSWORD)
+$env:TRPC_SHARED_REDIS_URL = "redis://:$redisPassword@127.0.0.1:6379/0"
+$env:TRPC_SHARED_DATABASE_URL = "postgresql+asyncpg://trpc_agent:$postgresPassword@127.0.0.1:5432/trpc_agent"
+Remove-Variable redisPassword, postgresPassword -ErrorAction SilentlyContinue
 ~~~
 
 关闭终端前清除凭证环境变量：
@@ -66,8 +92,14 @@ $env:TRPC_POSTGRES_DSN = "<本地共享后端地址>"
 ~~~powershell
 Remove-Item Env:LARK_APP_ID -ErrorAction SilentlyContinue
 Remove-Item Env:LARK_APP_SECRET -ErrorAction SilentlyContinue
+Remove-Item Env:LARK_TENANT_KEY -ErrorAction SilentlyContinue
 Remove-Item Env:WECOM_BOT_ID -ErrorAction SilentlyContinue
 Remove-Item Env:WECOM_BOT_SECRET -ErrorAction SilentlyContinue
+Remove-Item Env:WECOM_CORP_ID -ErrorAction SilentlyContinue
+Remove-Item Env:TRPC_SHARED_REDIS_URL -ErrorAction SilentlyContinue
+Remove-Item Env:TRPC_SHARED_DATABASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:TRPC_DEMO_REDIS_PASSWORD -ErrorAction SilentlyContinue
+Remove-Item Env:TRPC_DEMO_POSTGRES_PASSWORD -ErrorAction SilentlyContinue
 ~~~
 
 不要把真实值粘贴到源码、README、聊天截图或 Git 提交中。
@@ -101,11 +133,37 @@ uv run pytest tests/contract/channels -q
 
 ### 4.3 共享后端集成测试
 
-先按第三阶段 quickstart 启动 Redis/PostgreSQL shared profile，再运行：
+Docker Desktop Engine 必须已经启动。全部命令必须在第 3 节注入变量的同一个
+PowerShell 窗口执行；另一个窗口设置的进程级环境变量不会自动传入当前窗口。
 
 ~~~powershell
-uv run pytest tests/integration/channels -q
-uv run pytest tests/integration/shared -q
+docker info
+docker compose -f deploy/local-shared/compose.yaml up -d --wait --wait-timeout 120
+docker compose -f deploy/local-shared/compose.yaml ps
+
+$python = (Resolve-Path .\.venv\Scripts\python.exe).Path
+& $python -m trpc_service._cli shared-init
+if ($LASTEXITCODE -ne 0) { throw "shared-init failed" }
+
+$feishuBinding = & $python -m trpc_service._cli shared-channel-init --channel feishu | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw "Feishu binding initialization failed" }
+$wecomBinding = & $python -m trpc_service._cli shared-channel-init --channel wecom | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw "WeCom binding initialization failed" }
+~~~
+
+`shared-channel-init` 只把 `LARK_APP_SECRET` / `WECOM_BOT_SECRET` 变量名作为
+`secret_ref` 写入 PostgreSQL，不写入凭证值；输出只包含渠道、固定 Binding ID、
+identity digest 和状态。然后先运行 T078 的 28 个共享后端测试：
+
+~~~powershell
+& $python -m pytest -q -p no:cacheprovider -m shared_backend
+~~~
+
+预期为 `28 passed`、退出码 `0`、无 skip。再运行渠道集成、双 Worker e2e 和全量回归：
+
+~~~powershell
+& $python -m pytest -q -p no:cacheprovider tests/integration/channels tests/e2e
+& $python -m pytest -q -p no:cacheprovider
 ~~~
 
 验证：
@@ -123,6 +181,18 @@ uv run pytest -q
 ~~~
 
 预期：001、002、003 和 005 全部通过，既有 HTTP v1 不变。
+
+也可以使用仓库内的一键门禁脚本；脚本使用现有 `.venv`，不会触发联网安装：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File specs/005-dual-im-real-channel-flow/scripts/run-automated-validation.ps1
+~~~
+
+安全扫描命令只输出命中数量和文件路径，不回显疑似敏感值：
+
+~~~powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File specs/005-dual-im-real-channel-flow/scripts/scan-sensitive-material.ps1
+~~~
 
 ## 5. SDK 测试替身故障矩阵
 
@@ -143,20 +213,55 @@ uv run pytest -q
 
 ## 6. 启动 Adapter
 
-实现阶段应提供彼此独立的入口，示例目标命令：
+在完成 T078 后，在同一个安全 PowerShell 中启动两个 Worker 和每个渠道的两个
+Adapter。子进程继承当前终端环境变量，日志只写入本机临时目录：
 
 ~~~powershell
-uv run python -m trpc_service._cli shared-init
-uv run python -m trpc_service._cli shared-serve --node-id worker-a --port 8001
-uv run python -m trpc_service._cli shared-serve --node-id worker-b --port 8002
-uv run python -m trpc_service._cli channel-serve --channel feishu --node-id adapter-a
-uv run python -m trpc_service._cli channel-serve --channel feishu --node-id adapter-b
-uv run python -m trpc_service._cli channel-serve --channel wecom --node-id adapter-a
-uv run python -m trpc_service._cli channel-serve --channel wecom --node-id adapter-b
+$repoRoot = (Get-Location).Path
+$logDir = Join-Path $env:TEMP ("trpc-real-acceptance-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+New-Item -ItemType Directory -Path $logDir | Out-Null
+
+function Start-TrpcProcess([string]$Name, [string[]]$ProcessArgs) {
+    Start-Process -FilePath $python -WorkingDirectory $repoRoot `
+        -ArgumentList $ProcessArgs -PassThru `
+        -RedirectStandardOutput (Join-Path $logDir "$Name.out.log") `
+        -RedirectStandardError (Join-Path $logDir "$Name.err.log")
+}
+
+$workerA = Start-TrpcProcess "worker-a" @("-m", "trpc_service._cli", "shared-serve", "--node-id", "worker-a", "--port", "8001")
+$workerB = Start-TrpcProcess "worker-b" @("-m", "trpc_service._cli", "shared-serve", "--node-id", "worker-b", "--port", "8002")
+$feishuA = Start-TrpcProcess "feishu-a" @("-m", "trpc_service._cli", "channel-serve", "--channel", "feishu", "--node-id", "feishu-a")
+$feishuB = Start-TrpcProcess "feishu-b" @("-m", "trpc_service._cli", "channel-serve", "--channel", "feishu", "--node-id", "feishu-b")
+$wecomA = Start-TrpcProcess "wecom-a" @("-m", "trpc_service._cli", "channel-serve", "--channel", "wecom", "--node-id", "wecom-a")
+$wecomB = Start-TrpcProcess "wecom-b" @("-m", "trpc_service._cli", "channel-serve", "--channel", "wecom", "--node-id", "wecom-b")
+
+Start-Sleep -Seconds 5
+Invoke-RestMethod http://127.0.0.1:8001/readyz
+Invoke-RestMethod http://127.0.0.1:8002/readyz
+$feishuReadiness = Invoke-RestMethod "http://127.0.0.1:8001/v1/channels/readiness?identity_digest=$($feishuBinding.identity_digest)"
+$wecomReadiness = Invoke-RestMethod "http://127.0.0.1:8001/v1/channels/readiness?identity_digest=$($wecomBinding.identity_digest)"
+$feishuReadiness
+$wecomReadiness
+$logDir
 ~~~
 
-最终 CLI 名称以 tasks 阶段的契约测试为准。预期每个 Channel Identity 只有一个
-Adapter 为 ready，另一个保持 standby。
+预期两个 Worker 均为 `ready`，每个 Channel Identity 的共享 readiness 为 `ready`，
+且只报告一个 `owner_node_id` 和一个 generation。另一个 Adapter 进程保持 standby。
+
+Worker 的安全状态接口可使用 Channel Identity 摘要查询 ownership；响应不会回显摘要：
+
+~~~text
+GET /v1/channels/readiness?identity_digest=<64位小写十六进制摘要>
+~~~
+
+按租户和 trace 查询脱敏链路摘要：
+
+~~~powershell
+uv run trpc-agent-trace-diagnose --tenant-id tenant-alpha --trace-id <trace-uuid>
+~~~
+
+输出仅包含租户摘要、trace 角色、Session 摘要、Adapter 节点/generation、
+Delivery ID/attempt/status 和稳定错误类型，不包含原始用户、消息、凭证或连接 URL。
 
 ## 7. 飞书真实客户端验收
 

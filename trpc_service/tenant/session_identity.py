@@ -6,7 +6,7 @@ from hashlib import sha256
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from trpc_service.channels.contracts import ConversationType
+from trpc_service.channels.contracts import Channel, ConversationType
 from trpc_service.tenant.models import VerifiedTenantContext
 
 
@@ -16,6 +16,7 @@ class SessionIdentity(BaseModel):
     tenant_id: str
     agent_id: str
     binding_id: str
+    channel: Channel
     platform_session_id: str = Field(pattern=r"^sess_[0-9a-f]{64}$")
     sdk_app_name: str
     sdk_user_id: str
@@ -36,22 +37,28 @@ def derive_session_identity(
     context: VerifiedTenantContext,
     conversation_type: ConversationType | str,
     external_conversation_id: str,
+    group_sender_id: str | None = None,
 ) -> SessionIdentity:
     kind = ConversationType(conversation_type)
-    scope_digest = _length_prefixed_digest(
-        context.tenant_id,
-        context.agent_id,
-        context.binding_id,
-        context.channel.value,
-        context.external_user_id,
-        kind.value,
-        external_conversation_id,
-    )
+    if kind == ConversationType.GROUP:
+        sender_scope = group_sender_id or context.external_user_id
+        scope_parts = (
+            context.tenant_id, context.agent_id, context.binding_id,
+            context.channel.value, kind.value, external_conversation_id, sender_scope,
+        )
+    else:
+        scope_parts = (
+            context.tenant_id, context.agent_id, context.binding_id,
+            context.channel.value, kind.value, context.external_user_id,
+            external_conversation_id,
+        )
+    scope_digest = _length_prefixed_digest(*scope_parts)
     user_digest = _length_prefixed_digest(context.tenant_id, context.external_user_id)
     return SessionIdentity(
         tenant_id=context.tenant_id,
         agent_id=context.agent_id,
         binding_id=context.binding_id,
+        channel=context.channel,
         platform_session_id=f"sess_{scope_digest}",
         sdk_app_name=f"app_{_length_prefixed_digest(context.tenant_id, context.agent_id)[:32]}",
         sdk_user_id=f"user_{user_digest[:32]}",
@@ -68,10 +75,12 @@ def assert_session_ownership(
     expected_user_digest = _length_prefixed_digest(context.tenant_id, context.external_user_id)
     expected = (
         context.tenant_id, context.agent_id, context.binding_id,
+        context.channel,
         expected_app, f"user_{expected_user_digest[:32]}", f"sha256:{expected_user_digest}",
     )
     actual = (
         identity.tenant_id, identity.agent_id, identity.binding_id,
+        identity.channel,
         identity.sdk_app_name, identity.sdk_user_id, identity.external_user_digest,
     )
     if expected != actual:

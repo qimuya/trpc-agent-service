@@ -24,10 +24,22 @@ from trpc_service.storage.models import NodeIdentity
 from trpc_service.storage.redis_session import SharedSessionBackendFactory
 from trpc_service.storage.shared import SharedPlatformAdapters
 from trpc_service.storage.redis_leases import RedisSessionLeaseManager
+from trpc_service.storage.redis_adapter_leases import RedisAdapterOwnershipRepository
 from trpc_service.metrics.shared import SharedMetricsRecorder
 from trpc_service.recovery.reconciler import RecoveryReconciler
 from trpc_service.storage.contracts import AuditUnavailable, StateBackendUnavailable
 import asyncio
+
+
+def adapter_readiness_payload(state: object) -> dict[str, object]:
+    """Render ownership state without echoing the channel identity digest."""
+
+    return {
+        "readiness": state.phase.value,
+        "owner_node_id": state.owner_node_id,
+        "generation": state.generation,
+        "expires_in_ms": state.expires_in_ms,
+    }
 
 
 @dataclass(slots=True)
@@ -136,6 +148,10 @@ def create_shared_app(environ: Mapping[str, str] | None = None) -> Starlette:
     """Build one stateless Worker process over the configured shared backends."""
 
     source = dict(environ or {})
+    # This composition root is explicitly for the shared backend. Requiring
+    # every in-process caller to repeat the profile selector made otherwise
+    # complete Redis/PostgreSQL settings silently load as LOCAL.
+    source["TRPC_RUNTIME_PROFILE"] = "shared"
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
@@ -161,7 +177,23 @@ def create_shared_app(environ: Mapping[str, str] | None = None) -> Starlette:
     async def messages(request: object) -> JSONResponse:
         return await request.app.state.adapter.handle(request)
 
+    async def adapter_readiness(request: object) -> JSONResponse:
+        identity_digest = request.query_params.get("identity_digest", "")
+        if (
+            len(identity_digest) != 64
+            or any(character not in "0123456789abcdef" for character in identity_digest)
+        ):
+            return JSONResponse({"status": "invalid_request"}, status_code=400)
+        try:
+            state = await RedisAdapterOwnershipRepository(
+                request.app.state.runtime.adapters.redis
+            ).inspect(identity_digest)
+        except StateBackendUnavailable:
+            return JSONResponse({"status": "unavailable"}, status_code=503)
+        return JSONResponse(adapter_readiness_payload(state))
+
     return Starlette(lifespan=lifespan, routes=[
         Route("/healthz", health), Route("/readyz", ready),
+        Route("/v1/channels/readiness", adapter_readiness),
         Route("/v1/local/messages", messages, methods=["POST"]),
     ])

@@ -8,6 +8,7 @@ from uuid import UUID
 
 from trpc_service.audit.models import AuditRecord, PreAuthScope, TenantScope
 from trpc_service.channels.contracts import Channel, VerifiedBindingScope
+from trpc_service.channels.identity import ChannelIdentity
 from trpc_service.config.settings import PlatformSettings
 from trpc_service.storage.contracts import (
     AccessDenied,
@@ -15,6 +16,7 @@ from trpc_service.storage.contracts import (
     BindingAuthMaterial,
     ConditionalWriteFailed,
     NotFound,
+    ResolvedChannelBinding,
     SecretBytes,
     SecretUnavailable,
 )
@@ -24,12 +26,17 @@ from trpc_service.storage.models import ClaimDisposition, ClaimResult, Execution
 
 class InMemoryIdempotencyRepository:
     def __init__(self) -> None:
-        self._records: dict[tuple[str, str, str], IdempotencyRecord] = {}
+        self._records: dict[tuple[str, str, str, str], IdempotencyRecord] = {}
         self.fail_complete_once = False
 
     @staticmethod
-    def _key(key: IdempotencyKey) -> tuple[str, str, str]:
-        return key.tenant_id, key.binding_id, key.external_message_id
+    def _key(key: IdempotencyKey) -> tuple[str, str, str, str]:
+        return (
+            key.tenant_id,
+            key.channel.value,
+            key.binding_id,
+            key.external_message_id,
+        )
 
     async def claim(self, key: IdempotencyKey, fingerprint: str, trace_id: UUID, now: object) -> ClaimResult:
         storage_key = self._key(key)
@@ -215,6 +222,55 @@ class InMemoryPlatformAdapters:
             scope,
             external_user_id=external_user_id,
             trace_id=trace_id,
+        )
+
+    async def resolve_by_channel_identity(
+        self,
+        identity: object,
+        *,
+        external_user_id: str,
+        trace_id: UUID,
+    ) -> ResolvedChannelBinding:
+        if not isinstance(identity, ChannelIdentity):
+            raise AccessDenied("Channel binding is unavailable.")
+        matches = [
+            binding
+            for binding in self._bindings.values()
+            if (
+                binding.channel == identity.channel
+                and binding.provider_tenant_key == identity.provider_tenant_key
+                and binding.provider_app_or_bot_id == identity.provider_app_or_bot_id
+                and binding.channel_identity_digest == identity.identity_digest
+            )
+        ]
+        if len(matches) != 1:
+            raise AccessDenied("Channel binding is unavailable.")
+        binding = matches[0]
+        scope = VerifiedBindingScope._issue(
+            binding_id=binding.binding_id,
+            channel=binding.channel,
+        )
+        try:
+            context = self._resolve_active_context(
+                scope,
+                external_user_id=external_user_id,
+                trace_id=trace_id,
+            ).model_copy(
+                update={
+                    "config_version": max(
+                        self._tenants[binding.tenant_id].config_version,
+                        self._agents[(binding.tenant_id, binding.agent_id)].config_version,
+                        binding.config_version,
+                    )
+                }
+            )
+        except (AccessDenied, KeyError, ValueError):
+            raise AccessDenied("Channel binding is unavailable.") from None
+        return ResolvedChannelBinding(
+            scope=scope,
+            context=context,
+            secret_ref=binding.secret_ref,
+            config_version=context.config_version,
         )
 
     def _resolve_active_context(

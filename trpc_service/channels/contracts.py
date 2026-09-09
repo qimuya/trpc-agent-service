@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
@@ -12,6 +12,12 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 
 class Channel(StrEnum):
     LOCAL_HTTP = "local_http"
+    FEISHU = "feishu"
+    WECOM = "wecom"
+
+    @property
+    def is_real_im(self) -> bool:
+        return self in {Channel.FEISHU, Channel.WECOM}
 
 
 class ConversationType(StrEnum):
@@ -47,6 +53,11 @@ class InboundMessage(_StrictFrozenModel):
     external_user_id: str = Field(min_length=1, max_length=128)
     conversation_type: ConversationType
     external_conversation_id: str = Field(min_length=1, max_length=128)
+    channel_identity_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    group_sender_id: str | None = Field(default=None, min_length=1, max_length=128)
+    message_type: Literal["text"] = "text"
     text: str = Field(min_length=1, max_length=4000)
     received_at: datetime
     trace_id: UUID
@@ -62,6 +73,17 @@ class InboundMessage(_StrictFrozenModel):
         if value.tzinfo is None or value.utcoffset() is None or value.utcoffset().total_seconds() != 0:
             raise ValueError("received_at must be UTC-aware")
         return value
+
+    @model_validator(mode="after")
+    def validate_real_im_scope(self) -> Self:
+        if self.channel.is_real_im:
+            if self.channel_identity_digest is None:
+                raise ValueError("real IM message requires a trusted channel identity")
+            if self.conversation_type == ConversationType.GROUP and self.group_sender_id is None:
+                raise ValueError("group message requires a sender scope")
+            if self.conversation_type == ConversationType.DIRECT and self.group_sender_id is not None:
+                raise ValueError("direct message cannot contain a group sender scope")
+        return self
 
 
 class ErrorDetail(_StrictFrozenModel):
@@ -110,3 +132,11 @@ class VerifiedBindingScope(_StrictFrozenModel):
         scope = cls.model_construct(binding_id=binding_id, channel=channel)
         scope._verified = True
         return scope
+
+
+class UnifiedInboundMessage(InboundMessage):
+    """SDK-independent inbound message accepted from verified IM adapters."""
+
+
+class UnifiedReply(OutboundReply):
+    """Provider-independent reply returned by the gateway."""

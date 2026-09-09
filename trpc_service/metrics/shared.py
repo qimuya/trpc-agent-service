@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from hashlib import sha256
 
-from trpc_service.audit.models import TenantScope
+from trpc_service.audit.models import PreAuthScope, TenantScope
+from trpc_service.channels.contracts import Channel
 from trpc_service.metrics.inmemory import InMemoryMetricsRecorder
+from trpc_service.metrics.models import ChannelMetricEvent
 
 
 def _anonymous(value: str) -> str:
@@ -35,3 +37,28 @@ class SharedMetricsRecorder(InMemoryMetricsRecorder):
             "first_trace": first_trace, "owner_trace": owner_trace,
             "execution_trace": execution_trace, "generation": generation,
         })
+
+    def observe_channel(
+        self,
+        scope: TenantScope | PreAuthScope,
+        *,
+        channel: Channel,
+        stage: str,
+        outcome: str,
+        duration_ms: float,
+        attempt_no: int | None = None,
+        generation: int | None = None,
+    ) -> None:
+        event = ChannelMetricEvent(
+            node_id=self.node_id,
+            tenant=_anonymous(
+                scope.tenant_id if isinstance(scope, TenantScope) else "__preauth__"
+            ),
+            channel=channel,
+            stage=stage,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            attempt_no=attempt_no,
+            generation=generation,
+        )
+        self.events.append(event.model_dump(mode="json"))

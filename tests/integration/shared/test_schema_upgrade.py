@@ -1,7 +1,10 @@
 import pytest
 from sqlalchemy import text
 
-from trpc_service.storage.postgres.database import PostgresDatabase
+from trpc_service.storage.postgres.database import (
+    SUPPORTED_SCHEMA_VERSION,
+    PostgresDatabase,
+)
 
 
 @pytest.mark.shared_backend
@@ -26,5 +29,5 @@ async def test_existing_v1_database_is_upgraded_without_reset(
             "AND column_name = 'agent_id')"
         ))
     assert has_column is True
-    assert await database.verify_schema() == 2
+    assert await database.verify_schema() == SUPPORTED_SCHEMA_VERSION
     await database.close()

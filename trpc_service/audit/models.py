@@ -43,6 +43,19 @@ class AuditDecision(StrEnum):
     AGENT_FAILED = "agent_failed"
     OUTCOME_UNKNOWN = "outcome_unknown"
     AUDIT_INCOMPLETE = "audit_incomplete"
+    SELF_MESSAGE_IGNORED = "self_message_ignored"
+    SENDER_IDENTITY_UNVERIFIED = "sender_identity_unverified"
+    BINDING_REJECTED = "binding_rejected"
+    NOT_ADDRESSED = "not_addressed"
+    UNSUPPORTED_MESSAGE = "unsupported_message"
+    INVALID_OR_EMPTY_TEXT = "invalid_or_empty_text"
+    DELIVERY_RETRYING = "delivery_retrying"
+    DELIVERED = "delivered"
+    DELIVERY_FAILED = "delivery_failed"
+    DELIVERY_UNKNOWN = "delivery_unknown"
+    ADAPTER_LEASE_ACQUIRED = "adapter_lease_acquired"
+    ADAPTER_LEASE_LOST = "adapter_lease_lost"
+    STALE_ADAPTER_REJECTED = "stale_adapter_rejected"
 
 
 class AuditRecord(_AuditModel):
@@ -70,6 +83,22 @@ class AuditRecord(_AuditModel):
     error_type: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]*$")
     cost: Decimal = Field(default=Decimal("0"), ge=0)
     external_message_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    adapter_node_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    )
+    adapter_generation: int | None = Field(default=None, gt=0)
+    channel_identity_digest: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    provider_message_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    delivery_id: UUID | None = None
+    delivery_attempt_no: int | None = Field(default=None, ge=1, le=4)
+    delivery_status: str | None = Field(
+        default=None,
+        pattern=r"^(pending|sending|retry_wait|delivered|delivery_failed|delivery_unknown)$",
+    )
     created_at: datetime
 
     @field_validator("created_at")

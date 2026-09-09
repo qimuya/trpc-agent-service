@@ -166,7 +166,10 @@ class RedisSessionLeaseManager:
     async def acquire_for_message(self, context: Any, identity: Any, key: Any) -> RedisSessionLease:
         if self.node is None:
             raise StateBackendUnavailable("Node identity is unavailable.")
-        digest = sha256(f"{key.tenant_id}|{key.binding_id}|{key.external_message_id}".encode()).hexdigest()
+        # Reuse the collision-safe, channel-scoped idempotency identity.  The
+        # digest is diagnostic input only; the authoritative lease key is the
+        # tenant/agent/session key constructed below.
+        digest = self.codec.idempotency(key).rsplit(":", 1)[-1]
         started = monotonic()
         try:
             lease = await self.acquire(
